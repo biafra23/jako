@@ -160,15 +160,17 @@ def cmd_verify(args, cfg, base: Path, discovery: DiscoveryResult, llm: LLMClient
     if vcfg.mode in ("per_file", "both"):
         for i, unit in enumerate(targets, 1):
             ust = state.get_or_create(unit.source_path)
-            if ust.status == "verified" and not args.force:
-                print(f"[verify] [{i}/{len(targets)}] SKIP {Path(unit.source_path).name} (verified)")
-                continue
-            if ust.status not in ("translated", "verified", "failed"):
-                print(f"[verify] [{i}/{len(targets)}] SKIP {Path(unit.source_path).name} (status={ust.status})")
-                continue
             if not Path(unit.target_path).exists():
                 print(f"[verify] [{i}/{len(targets)}] SKIP {Path(unit.source_path).name} (no output)")
                 continue
+            if ust.status == "verified" and not args.force:
+                print(f"[verify] [{i}/{len(targets)}] SKIP {Path(unit.source_path).name} (verified)")
+                continue
+            # A .kt file on disk is sufficient to verify, regardless of state's
+            # bookkeeping. State might be `pending` because of a --force reset
+            # or because the file was produced by hand / by a different run.
+            if ust.status == "pending":
+                ust.status = "translated"
             t0 = time.time()
             res = verify_and_retry(unit, units_by_path, llm, vcfg, tcfg, state)
             elapsed = time.time() - t0

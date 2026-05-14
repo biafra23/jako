@@ -10,6 +10,7 @@ The plan calls for:
 from __future__ import annotations
 
 import json
+import socket
 import time
 import urllib.error
 import urllib.request
@@ -100,6 +101,11 @@ class LLMClient:
                 last_err = e
                 elapsed = time.time() - t0
                 self._log(log_tag, attempt, payload, None, elapsed, repr(e))
+                # A timeout that already burned the full per-request budget is
+                # almost never transient — it means the prompt+output don't fit
+                # in the configured time. Retrying just multiplies the wait.
+                if self._is_timeout(e) and elapsed >= self.cfg.timeout_seconds - 1:
+                    break
                 if attempt < self.cfg.transient_retries:
                     time.sleep(self.cfg.transient_backoff_seconds * attempt)
                     continue
@@ -109,6 +115,20 @@ class LLMClient:
                 raise LLMError(f"malformed response from LM Studio: {e!r}") from e
 
         raise LLMError(f"LM Studio request failed after {self.cfg.transient_retries} attempts: {last_err!r}")
+
+    @staticmethod
+    def _is_timeout(err: BaseException) -> bool:
+        """True if the exception represents a request-deadline timeout (vs. a
+        network drop, DNS hiccup, or HTTP 5xx that's worth retrying).
+        """
+        if isinstance(err, TimeoutError):
+            return True
+        # urllib raises URLError wrapping socket.timeout / TimeoutError when a
+        # read times out.
+        reason = getattr(err, "reason", None)
+        if isinstance(reason, (TimeoutError, socket.timeout)):
+            return True
+        return False
 
     @staticmethod
     def _extract_content(data: dict[str, Any]) -> str:

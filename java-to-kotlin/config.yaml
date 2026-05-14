@@ -12,9 +12,16 @@ llm:
   base_url: http://localhost:1234/v1
   model_name: google/gemma-4-31b
   temperature: 0.1
-  # Cap; translate.py also sizes the request based on the input length.
-  max_tokens: 16384
-  timeout_seconds: 600
+  # Hard upper bound on completion tokens per request. Set well below
+  # LM Studio's loaded context length (64141 here) so input+output fits.
+  # Big translations (Bytes.java is ~19K input tokens, ~17K output) need
+  # the headroom. 48000 leaves ~16K for prompt, fine for files up to
+  # ~1500 LOC of Java.
+  max_tokens: 48000
+  # Per-request HTTP/LLM timeout. A full translation of a ~1700-LOC file at
+  # ~19 sec/LOC observed throughput (Gemma 31B Q4_K_M on M1, no_think) wants
+  # ~55 min, so 3600 gives generous headroom.
+  timeout_seconds: 3600
   # Transient-error retry (network/HTTP) — distinct from the semantic retry loop.
   transient_retries: 3
   transient_backoff_seconds: 5

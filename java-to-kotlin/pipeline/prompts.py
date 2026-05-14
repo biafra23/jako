@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 
-PROMPT_VERSION = "2"
+PROMPT_VERSION = "3"
 
 
 SYSTEM_INSTRUCTION = """\
@@ -58,6 +58,7 @@ DO make the mandatory adjustments:
 - Method overrides: add the Kotlin `override` keyword. Drop `@Override` annotations.
 - Nullability: when a Java parameter or field is annotated `@Nullable`, render the Kotlin type as `T?` and DROP the `@Nullable` annotation — Kotlin's `?` already expresses nullability, and JSR-305 `@Nullable` is not valid in Kotlin type-use position. Same for `@NotNull`/`@NonNull` on non-null types (just drop them). Otherwise treat parameters and returns of reference types as non-null unless Java code can clearly produce null (then mark `T?`).
 - Kotlin reserved-word identifiers: if a Java identifier (parameter, field, method name) clashes with a Kotlin keyword (`object`, `fun`, `val`, `var`, `class`, `is`, `in`, `out`, etc.), wrap it in backticks in the Kotlin output — for example a Java parameter named `object` becomes the backtick-quoted Kotlin name (literally a backtick character, then `object`, then a backtick character). Do NOT rename it — the faithfulness rule on parameter names trumps the keyword conflict.
+- Method calls vs. property access: a Java method call `obj.foo()` translates to a Kotlin method call `obj.foo()` — keep the parentheses. Do NOT silently drop the parentheses to turn it into a property access (`obj.foo`). This is especially important for `size()`, `length()`, `get()`, `isEmpty()`, and other zero-arg methods, which look like Kotlin properties but are NOT properties in this codebase. Only render as a property if the Java declaration is a real field (e.g. `public int x;` → `val x: Int`).
 - Checked exceptions: Kotlin has no checked exceptions. Drop `throws` clauses. Do NOT add `@Throws` annotations unless the Java method was specifically annotated.
 - Generics: `? extends T` → `out T`; `? super T` → `in T`; raw `T[]` → `Array<T>`; primitive arrays → `IntArray` etc.
 - Nested classes: Java static nested → Kotlin nested class (no `inner` keyword). Java non-static inner → Kotlin `inner class`.

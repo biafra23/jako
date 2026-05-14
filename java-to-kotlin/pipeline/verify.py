@@ -34,8 +34,10 @@ class VerifyConfig:
 class CompileResult:
     ok: bool
     stdout: str
-    stderr: str
+    stderr: str          # errors filtered to the target file (or generic ones)
     returncode: int
+    raw_stderr: str = ""  # the full unfiltered kotlinc stderr, used by the
+                          # cascading-dep guard in verify_and_retry
 
 
 def _kotlinc_path() -> str:
@@ -213,9 +215,31 @@ def verify_and_retry(
         state.save()
         return result
 
-    # Topology guard: don't burn retries on errors that are just missing
-    # in-project deps — those need more files translated, not a smarter prompt.
-    err = (result.stderr or result.stdout or "").strip()
+    # Topology guard #1: target file itself is clean — only bundled dep .kt
+    # files are broken. Retrying our translation can't fix dep files; treat as
+    # blocked on deps and bail.
+    target_filename = kt_path.name
+    filtered_err = (result.stderr or "").strip()
+    raw_err = (result.raw_stderr or "").strip()
+    if not filtered_err and raw_err:
+        deps_in_error = sorted({
+            line.split(":", 1)[0].split("/")[-1]
+            for line in raw_err.splitlines()
+            if ".kt:" in line and "error:" in line
+            and target_filename not in line
+        })
+        state.mark(
+            unit.source_path,
+            last_error=f"blocked_on_dep_compile: {deps_in_error}\n{raw_err[:1500]}",
+            add_note="blocked_on_dep_compile:" + ",".join(deps_in_error),
+        )
+        state.save()
+        return result
+
+    # Topology guard #2: errors ARE in the target file, but every one of them
+    # is an unresolved reference to an in-project type we haven't translated /
+    # verified yet. Same conclusion — retrying our translation won't help.
+    err = filtered_err or (result.stdout or "").strip()
     blocked, missing = is_blocked_on_missing_deps(err, unit, units_by_path, state)
     if blocked:
         state.mark(
@@ -311,11 +335,26 @@ def _compile_with_sources(
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
     ok = proc.returncode == 0 and "error:" not in (proc.stderr + proc.stdout)
-    # Filter kotlinc errors so the model only sees errors involving the target file.
     if not ok:
-        filtered = _filter_errors_for(proc.stderr, target.name) or proc.stderr
-        return CompileResult(ok=False, stdout=proc.stdout, stderr=filtered, returncode=proc.returncode)
-    return CompileResult(ok=True, stdout=proc.stdout, stderr=proc.stderr, returncode=proc.returncode)
+        # Don't fall back to raw stderr if the filter strips everything — an
+        # empty filtered set is the signal that the target itself is clean and
+        # only the bundled dep .kt files are broken. The caller uses raw_stderr
+        # separately to detect that cascading-topology case.
+        filtered = _filter_errors_for(proc.stderr, target.name)
+        return CompileResult(
+            ok=False,
+            stdout=proc.stdout,
+            stderr=filtered,
+            returncode=proc.returncode,
+            raw_stderr=proc.stderr,
+        )
+    return CompileResult(
+        ok=True,
+        stdout=proc.stdout,
+        stderr=proc.stderr,
+        returncode=proc.returncode,
+        raw_stderr=proc.stderr,
+    )
 
 
 def _filter_errors_for(stderr: str, target_filename: str) -> str:

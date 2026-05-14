@@ -1,0 +1,45 @@
+# Java -> Kotlin conversion pipeline config.
+# Paths are resolved relative to this file unless absolute.
+
+project:
+  # Root containing the Java source tree to convert.
+  # For the tuweni smoke test we point at the bytes module.
+  source_root: ~/tuweni-gemma4-pipe/bytes/src/main/java
+  test_root:   ~/tuweni-gemma4-pipe/bytes/src/test/java
+  output_root: output
+
+llm:
+  base_url: http://localhost:1234/v1
+  model_name: google/gemma-4-26b-a4b
+  temperature: 0.1
+  # Cap; translate.py also sizes the request based on the input length.
+  max_tokens: 16384
+  timeout_seconds: 600
+  # Transient-error retry (network/HTTP) — distinct from the semantic retry loop.
+  transient_retries: 3
+  transient_backoff_seconds: 5
+
+translate:
+  # Max number of direct-dependency signature blocks to splice into the prompt.
+  max_dependency_signatures: 12
+  # Hard truncation on each dep signature blob to keep prompt size bounded.
+  max_signature_chars: 4000
+
+verify:
+  # per_file = compile each .kt against already-converted deps after translation.
+  # per_module = compile the entire output tree once at the end.
+  # both = per_file during the run + a final per_module sweep.
+  mode: both
+  # Bound on semantic retries when kotlinc rejects a file.
+  max_retries: 3
+  # Extra classpath JARs (absolute paths) used at per_file compile time.
+  extra_classpath: []
+
+discover:
+  # regex (default) or javalang (more accurate, requires `pip install javalang`).
+  parser: regex
+  # If true, test files are treated as a separate (later) batch.
+  separate_tests: true
+
+state:
+  dir: state

@@ -91,13 +91,15 @@ class LLMClient:
 
     @staticmethod
     def _extract_content(data: dict[str, Any]) -> str:
-        """Return the assistant's text. Falls back to reasoning_content.
+        """Return the assistant's text. Falls back to reasoning_content only if
+        ``content`` is empty.
 
         Some LM Studio backends (e.g. the Gemma reasoning variant served here)
-        emit the working answer into ``message.reasoning_content`` and leave
-        ``message.content`` empty if the model is truncated mid-stream. The
-        retry / extraction logic downstream is happy to find the fenced kotlin
-        block in either stream, so we concatenate them.
+        emit deliberation into ``message.reasoning_content`` separately from the
+        final answer in ``message.content``. The reasoning trace itself often
+        contains nested ```kotlin fenced snippets — concatenating it with the
+        final answer corrupts fence pairing, so we only fall back to reasoning
+        when content is truly empty (e.g. truncated mid-stream).
         """
         choices = data.get("choices") or []
         if not choices:
@@ -105,16 +107,11 @@ class LLMClient:
         msg = choices[0].get("message") or {}
         content = msg.get("content") or ""
         reasoning = msg.get("reasoning_content") or ""
-        combined = content
-        if not content.strip() and reasoning.strip():
-            combined = reasoning
-        elif reasoning.strip():
-            # Both present — keep both so the fence extractor can pick the
-            # longest valid block.
-            combined = reasoning + "\n\n" + content
-        if not combined.strip():
-            raise LLMError(f"no usable text in choice: {choices[0]!r}")
-        return combined
+        if content.strip():
+            return content
+        if reasoning.strip():
+            return reasoning
+        raise LLMError(f"no usable text in choice: {choices[0]!r}")
 
     def _log(
         self,

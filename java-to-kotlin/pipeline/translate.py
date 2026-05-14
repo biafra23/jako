@@ -25,7 +25,13 @@ from .prompts import (
 from .state import RunState
 
 
-_RE_FENCE = re.compile(r"```(?:kotlin|kt)?\s*\n(.*?)\n?```", re.DOTALL)
+# Strict opener: must say `kotlin` (or `kt`) so we don't accidentally pair with
+# unrelated fenced blocks (json, java, plain text) that the model might emit.
+_RE_FENCE_STRICT = re.compile(r"```(?:kotlin|kt)\s*\n(.*?)\n?```", re.DOTALL)
+_RE_FENCE_LOOSE = re.compile(r"```(?:kotlin|kt)?\s*\n(.*?)\n?```", re.DOTALL)
+
+# Heuristics for recognising the real translated file vs. a deliberation snippet.
+_RE_PACKAGE_DECL = re.compile(r"^\s*package\s+[\w.]+", re.MULTILINE)
 
 
 class TranslationError(RuntimeError):
@@ -39,12 +45,25 @@ class TranslateConfig:
 
 
 def extract_kotlin_block(model_output: str) -> str:
-    """Pull the single ```kotlin block out of the model output, or raise."""
-    matches = _RE_FENCE.findall(model_output)
+    """Pull the translated Kotlin file out of the model output.
+
+    Picks the largest fence whose body looks like a real Kotlin source file
+    (contains a ``package`` declaration). Falls back to the longest fence
+    overall if none match — and finally to the loose-regex (no language tag)
+    variant if the strict matcher finds nothing.
+    """
+    for matcher in (_RE_FENCE_STRICT, _RE_FENCE_LOOSE):
+        matches = matcher.findall(model_output)
+        if not matches:
+            continue
+        with_pkg = [m for m in matches if _RE_PACKAGE_DECL.search(m)]
+        if with_pkg:
+            return max(with_pkg, key=len)
+        # No fence had a package — fall through to next matcher; if also none,
+        # the loose pass will pick the longest as last-resort.
+    matches = _RE_FENCE_LOOSE.findall(model_output)
     if not matches:
         raise TranslationError("no kotlin code fence found in model output")
-    # If multiple fences are returned, prefer the longest — heuristic for
-    # "real file" vs. an inline snippet inside commentary.
     return max(matches, key=len)
 
 

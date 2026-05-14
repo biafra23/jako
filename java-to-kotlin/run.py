@@ -125,10 +125,22 @@ def cmd_translate(args, cfg, base: Path, discovery: DiscoveryResult, llm: LLMCli
 
 def cmd_verify(args, cfg, base: Path, discovery: DiscoveryResult, llm: LLMClient, state: RunState) -> None:
     vcfg_dict = cfg.get("verify", {})
+    classpath = list(vcfg_dict.get("extra_classpath") or [])
+    cp_file = vcfg_dict.get("classpath_file")
+    if cp_file:
+        cp_path = _resolve(base, cp_file)
+        if cp_path.exists():
+            for line in cp_path.read_text().splitlines():
+                line = line.strip()
+                if line and not line.startswith("#"):
+                    classpath.append(line)
+            print(f"[verify] classpath_file={cp_path} ({len(classpath)} entries total)")
+        else:
+            print(f"[verify] WARNING: classpath_file not found: {cp_path}")
     vcfg = VerifyConfig(
         mode=vcfg_dict.get("mode", "both"),
         max_retries=int(vcfg_dict.get("max_retries", 3)),
-        extra_classpath=list(vcfg_dict.get("extra_classpath") or []),
+        extra_classpath=classpath,
     )
     tcfg_dict = cfg.get("translate", {})
     tcfg = TranslateConfig(

@@ -10,7 +10,7 @@ project:
 
 llm:
   base_url: http://localhost:1234/v1
-  model_name: google/gemma-4-26b-a4b
+  model_name: google/gemma-4-31b
   temperature: 0.1
   # Cap; translate.py also sizes the request based on the input length.
   max_tokens: 16384

@@ -2,9 +2,11 @@
 
 A detailed implementation plan for a custom, locally-run conversion pipeline.
 
-**Design pattern:** Claude Opus designs and writes the orchestration tooling once. Gemma 4 26B-A4B (Q6_K, served by LM Studio) does the per-file translation work at runtime. No cloud calls during the actual conversion run.
+**Design pattern:** Claude Opus designs and writes the orchestration tooling once. Gemma 4 31B (Q4_K_M, served by LM Studio) does the per-file translation work at runtime. No cloud calls during the actual conversion run.
 
-**Target environment:** 64GB M1 Mac, LM Studio serving `Gemma 4 26B A4B Instruct Q6_K` on its local OpenAI-compatible endpoint (`http://localhost:1234/v1`).
+**Target environment:** 64GB M1 Mac, LM Studio serving `google/gemma-4-31b` (Q4_K_M GGUF) on its local OpenAI-compatible endpoint (`http://localhost:1234/v1`), loaded with a context length of 64141 tokens.
+
+**Model choice note:** An earlier version of this plan called for `Gemma 4 26B A4B Instruct Q6_K`. We switched to the larger 31B at Q4_K_M because it is the model that is loaded on this host with a usable context window; LM Studio's JIT-loaded models default to their GGUF-metadata context (≈4 K tokens), which truncates the reasoning-tokens stream this Gemma variant emits before any answer reaches `content`. The pipeline is model-agnostic — change `llm.model_name` in `config.yaml` to swap.
 
 **Conversion goal:** Faithful, structure-preserving ("non-idiomatic") Kotlin — a 1:1 mechanical translation that compiles and behaves identically, *not* a refactor into idiomatic Kotlin patterns.
 
@@ -103,7 +105,7 @@ A single LM Studio instance serves requests sequentially — there is no real co
 - Pipeline phases 2 and 3: as soon as a file is translated, hand it to verification while the next file translates. Modest speedup.
 - If you have a second machine or want to run two LM Studio instances, you could shard independent (non-dependent) files across them — but this is an optimization to defer.
 
-Realistically: expect this to run for a while on a 26B model. Make it resumable (§7) so an interrupted run is cheap to continue. Run it overnight.
+Realistically: expect this to run for a while on a 31B model. Make it resumable (§7) so an interrupted run is cheap to continue. Run it overnight.
 
 ---
 
@@ -231,5 +233,5 @@ Do not build all of it before running any of it. The prompt template (step 4) is
 - **Generics and wildcards** — Java's `? extends` / `? super` map to Kotlin variance in non-obvious ways; a frequent retry cause. Consider a category-specific note if it recurs.
 - **Checked exceptions** — Kotlin has none; `throws` clauses just drop. Make sure the prompt says so explicitly or the model may invent annotations.
 - **Static members / nested classes** — `companion object` vs. top-level; call this out in the core instruction.
-- **Throughput** — a 26B model on one M1 is not fast. Resumability + overnight runs are the answer, not heroic optimization.
+- **Throughput** — a 31B model on one M1 is not fast. Resumability + overnight runs are the answer, not heroic optimization.
 - **Silent semantic errors** — compiles, runs, wrong. Only the optional test-execution step or the Opus review really catches these. Be honest with yourself about how much behavioral verification you need before trusting the output.

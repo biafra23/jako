@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -104,6 +105,92 @@ def _dep_kotlin_paths(unit: JavaUnit, units_by_path: dict[str, JavaUnit]) -> lis
     return paths
 
 
+_RE_UNRESOLVED = re.compile(r"error:\s*unresolved reference '([A-Za-z_][A-Za-z0-9_]*)'", re.IGNORECASE)
+_RE_OVERRIDES_NOTHING = re.compile(r"error:\s*'([A-Za-z_][A-Za-z0-9_]*)' overrides nothing", re.IGNORECASE)
+
+
+def is_blocked_on_missing_deps(
+    compiler_error: str,
+    unit: JavaUnit,
+    units_by_path: dict[str, JavaUnit],
+    state: "RunState | None" = None,
+) -> tuple[bool, set[str]]:
+    """Return (True, missing_type_names) iff every kotlinc error is plausibly caused
+    by a project-internal dependency that hasn't been translated yet.
+
+    Heuristic — we consider a file "blocked on deps" when:
+      * The error set is non-empty.
+      * Every error is either:
+          - `unresolved reference 'X'` where X is a top-level type declared by
+            another in-project unit whose Kotlin output is missing or not yet
+            verified, OR
+          - `'X' overrides nothing` where X is a method on a type the file is
+            implementing/extending whose Kotlin output is missing (downstream
+            effect of the unresolved supertype).
+
+    Errors that don't fit either pattern (real translation bugs) cause us to
+    return (False, ...) so the normal retry loop runs.
+    """
+    if not compiler_error.strip():
+        return False, set()
+
+    # Names declared somewhere in the project.
+    project_types: set[str] = set()
+    declared_in: dict[str, JavaUnit] = {}
+    for u in units_by_path.values():
+        for n in u.type_names:
+            project_types.add(n)
+            declared_in[n] = u
+
+    # Names where the unit IS in-project but its Kotlin output is missing or
+    # not yet verified.
+    def is_missing(name: str) -> bool:
+        owner = declared_in.get(name)
+        if owner is None:
+            return False
+        kt = Path(owner.target_path)
+        if not kt.exists():
+            return True
+        if state is not None:
+            owner_state = state.units.get(owner.source_path)
+            if owner_state is None or owner_state.status != "verified":
+                return True
+        return False
+
+    missing: set[str] = set()
+    has_other_error = False
+    for line in compiler_error.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if "error:" not in line:
+            continue
+        m = _RE_UNRESOLVED.search(line)
+        if m:
+            name = m.group(1)
+            if is_missing(name):
+                missing.add(name)
+                continue
+            # Unresolved reference to something NOT in our project — that's
+            # a translation bug (e.g. wrong import).
+            has_other_error = True
+            continue
+        m = _RE_OVERRIDES_NOTHING.search(line)
+        if m:
+            # 'overrides nothing' is almost always a downstream consequence of
+            # the supertype being unresolved. Only treat it as topology if we
+            # already have at least one matching unresolved-reference error.
+            if missing:
+                continue
+            has_other_error = True
+            continue
+        has_other_error = True
+
+    if has_other_error:
+        return False, missing
+    return bool(missing), missing
+
+
 def verify_and_retry(
     unit: JavaUnit,
     units_by_path: dict[str, JavaUnit],
@@ -123,6 +210,19 @@ def verify_and_retry(
     result = _compile_with_sources(kt_path, dep_paths, cfg.extra_classpath)
     if result.ok:
         state.mark(unit.source_path, status="verified", last_error=None)
+        state.save()
+        return result
+
+    # Topology guard: don't burn retries on errors that are just missing
+    # in-project deps — those need more files translated, not a smarter prompt.
+    err = (result.stderr or result.stdout or "").strip()
+    blocked, missing = is_blocked_on_missing_deps(err, unit, units_by_path, state)
+    if blocked:
+        state.mark(
+            unit.source_path,
+            last_error=f"blocked_on_deps: {sorted(missing)}\n{err[:1500]}",
+            add_note="blocked_on_deps:" + ",".join(sorted(missing)),
+        )
         state.save()
         return result
 

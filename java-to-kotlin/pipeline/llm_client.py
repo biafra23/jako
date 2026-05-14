@@ -27,6 +27,12 @@ class LLMConfig:
     timeout_seconds: int = 600
     transient_retries: int = 3
     transient_backoff_seconds: int = 5
+    # Best-effort reasoning suppression. Each backend reads at most one of
+    # these; we send all of them so LM Studio / vLLM / OpenAI-compatible
+    # servers can pick up the knob they actually honour. None = don't send.
+    reasoning_effort: str | None = None      # "minimal" / "low" / "medium" / "high"
+    enable_thinking: bool | None = None      # vLLM/Qwen-style boolean
+    no_think: bool = False                   # Some chat templates accept `/no_think` in the prompt
 
 
 class LLMError(RuntimeError):
@@ -42,19 +48,34 @@ class LLMClient:
 
     def chat(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         log_tag: str | None = None,
         max_tokens: int | None = None,
         temperature: float | None = None,
     ) -> str:
-        payload = {
+        # Optionally prepend `/no_think` to the last user turn. Some chat
+        # templates (Qwen, certain Gemma fine-tunes) consume this token to
+        # suppress the model's thinking pass.
+        if self.cfg.no_think and messages:
+            messages = [dict(m) for m in messages]
+            for m in reversed(messages):
+                if m.get("role") == "user":
+                    m["content"] = "/no_think\n\n" + (m.get("content") or "")
+                    break
+
+        payload: dict[str, Any] = {
             "model": self.cfg.model_name,
             "messages": messages,
             "temperature": self.cfg.temperature if temperature is None else temperature,
             "max_tokens": self.cfg.max_tokens if max_tokens is None else max_tokens,
             "stream": False,
         }
+        if self.cfg.reasoning_effort is not None:
+            payload["reasoning_effort"] = self.cfg.reasoning_effort
+        if self.cfg.enable_thinking is not None:
+            # vLLM-style: chat_template_kwargs.enable_thinking
+            payload.setdefault("chat_template_kwargs", {})["enable_thinking"] = self.cfg.enable_thinking
         body = json.dumps(payload).encode("utf-8")
         url = self.cfg.base_url.rstrip("/") + "/chat/completions"
 

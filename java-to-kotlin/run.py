@@ -54,6 +54,9 @@ def _build_llm(cfg: dict, log_dir: Path) -> LLMClient:
             timeout_seconds=int(llm_cfg.get("timeout_seconds", 600)),
             transient_retries=int(llm_cfg.get("transient_retries", 3)),
             transient_backoff_seconds=int(llm_cfg.get("transient_backoff_seconds", 5)),
+            reasoning_effort=llm_cfg.get("reasoning_effort"),
+            enable_thinking=llm_cfg.get("enable_thinking"),
+            no_think=bool(llm_cfg.get("no_think", False)),
         ),
         log_dir=log_dir,
     )

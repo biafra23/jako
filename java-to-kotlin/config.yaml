@@ -18,6 +18,13 @@ llm:
   # Transient-error retry (network/HTTP) — distinct from the semantic retry loop.
   transient_retries: 3
   transient_backoff_seconds: 5
+  # Best-effort reasoning suppression. Each backend reads one of these at most;
+  # sending all of them lets the OpenAI / vLLM / Qwen-style servers each pick
+  # up the knob they honour. The prompt itself also instructs the model to
+  # skip deliberation — that's the load-bearing layer.
+  reasoning_effort: minimal
+  enable_thinking: false
+  no_think: true
 
 translate:
   # Max number of direct-dependency signature blocks to splice into the prompt.

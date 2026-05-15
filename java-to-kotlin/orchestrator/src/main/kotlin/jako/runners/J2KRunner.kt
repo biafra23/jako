@@ -3,7 +3,6 @@ package jako.runners
 import jako.Config
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.TimeUnit
 
 /**
  * Per-file backend chain step 1 — mechanical Java→Kotlin via JetBrains J2K.
@@ -55,23 +54,16 @@ private fun buildCommand(cfg: Config, javaIn: Path, ktOut: Path): List<String> {
 fun convertJ2K(cfg: Config, javaIn: Path, ktOut: Path): J2KResult {
     Files.createDirectories(ktOut.parent)
     val cmd = buildCommand(cfg, javaIn, ktOut)
-    val t0 = System.currentTimeMillis()
-    val pb = ProcessBuilder(cmd).redirectErrorStream(false)
-    val proc = pb.start()
-    val out = proc.inputStream.bufferedReader().readText()
-    val err = proc.errorStream.bufferedReader().readText()
-    val finished = proc.waitFor(cfg.j2k.timeoutSeconds, TimeUnit.SECONDS)
-    val elapsed = (System.currentTimeMillis() - t0) / 1000.0
-    if (!finished) {
-        proc.destroyForcibly()
-        return J2KResult(false, ktOut, "J2K timed out", elapsed)
+    val pr = runProcess(cmd = cmd, cwd = ktOut.parent, timeoutSeconds = cfg.j2k.timeoutSeconds)
+    if (pr.exitCode == -1) {
+        return J2KResult(false, ktOut, "J2K timed out\n${pr.stderr}", pr.elapsedSeconds)
     }
-    if (proc.exitValue() != 0) {
-        val tail = (err.ifBlank { out }).takeLast(2000)
-        return J2KResult(false, ktOut, tail, elapsed)
+    if (pr.exitCode != 0) {
+        val tail = (pr.stderr.ifBlank { pr.stdout }).takeLast(2000)
+        return J2KResult(false, ktOut, tail, pr.elapsedSeconds)
     }
     if (!Files.exists(ktOut) || Files.size(ktOut) == 0L) {
-        return J2KResult(false, ktOut, "J2K returned 0 but no .kt file was produced", elapsed)
+        return J2KResult(false, ktOut, "J2K returned 0 but no .kt file was produced", pr.elapsedSeconds)
     }
-    return J2KResult(true, ktOut, elapsedSeconds = elapsed)
+    return J2KResult(true, ktOut, elapsedSeconds = pr.elapsedSeconds)
 }

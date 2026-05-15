@@ -6,7 +6,6 @@ import kotlinx.serialization.json.JsonElement
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Calendar
-import java.util.concurrent.TimeUnit
 
 /**
  * Result type shared across all refinement backends (claude / local / deepseek).
@@ -55,19 +54,29 @@ private fun modelForRisk(cfg: Config, risk: String): String =
 
 private fun buildUserPrompt(javaFile: Path, ktFile: Path, extra: String): String {
     val lines = mutableListOf(
-        "Refine the Kotlin file at $ktFile.",
-        "The original Java is at $javaFile for reference.",
-        "Constraints:",
+        "Task: refine the single Kotlin file at $ktFile so it is the idiomatic-Kotlin equivalent of $javaFile.",
+        "",
+        "SCOPE — strict:",
+        "  - You MUST modify exactly one file: $ktFile.",
+        "  - You MUST NOT create any new file.",
+        "  - You MUST NOT edit any file other than $ktFile, including sibling .kt or .java files in this package, even if you notice issues there. Other files are handled by separate orchestrator calls.",
+        "  - You MAY read any source file in the project (the original .java, sibling .kt, .java in the same cycle) to understand cross-file types and signatures.",
+        "  - You MUST NOT run gradle, kotlinc, ./gradlew, or any compile/test command. The orchestrator runs the gate after this call. Running it yourself just burns turn budget.",
+        "",
+        "Interop constraints (apply only to $ktFile):",
         "  - Public API must remain Java-callable; Java tests in src/jvmTest/java compile against this file.",
         "  - Add @JvmStatic / @JvmField / @JvmOverloads / @JvmName as needed for interop.",
         "  - Do not introduce new external dependencies.",
-        "Apply the JetBrains java-to-kotlin skill conventions.",
+        "",
+        "Apply the JetBrains java-to-kotlin skill conventions to the refinement.",
         "Do not deliberate or print reasoning — edit the file and stop.",
     )
     if (extra.isNotBlank()) {
         lines.add("")
         lines.add("Additional context from the previous attempt:")
         lines.add(extra)
+        lines.add("")
+        lines.add("Use that context to refine $ktFile only. If the diagnostic points to a different file, ignore it — that file is fixed by a separate call.")
     }
     return lines.joinToString("\n")
 }
@@ -102,39 +111,26 @@ private fun sleepUntilWindowReset(stdout: String, stderr: String) {
     Thread.sleep(seconds * 1000)
 }
 
-private fun runProcess(cmd: List<String>, cwd: Path, timeoutSeconds: Long): ProcessResult {
-    val pb = ProcessBuilder(cmd).directory(cwd.toFile()).redirectErrorStream(false)
-    // The plan-2 design uses the Claude Code subscription (5-hour window,
-    // OAuth-based) for `claude -p`, with DeepSeek as the rate-limit fallback.
-    // If ANTHROPIC_API_KEY is present in the parent env (set, say, by the
-    // CLI session itself), claude -p prefers it over the subscription token
-    // and returns HTTP 401 if it's not a valid paid API key. Strip it from
-    // the subprocess env so the OAuth subscription path always wins.
-    pb.environment().remove("ANTHROPIC_API_KEY")
-    val t0 = System.currentTimeMillis()
-    val proc = pb.start()
-    // Newer claude -p versions block ~3s waiting for stdin even when the
-    // prompt is a positional arg, then emit "no stdin data received in 3s"
-    // and (in some versions) exit non-zero. Close stdin so claude proceeds
-    // immediately and the warning never appears.
-    proc.outputStream.close()
-    val out = proc.inputStream.bufferedReader().readText()
-    val err = proc.errorStream.bufferedReader().readText()
-    val finished = proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)
-    val elapsed = (System.currentTimeMillis() - t0) / 1000.0
-    if (!finished) {
-        proc.destroyForcibly()
-        return ProcessResult(-1, out, err + "\n[timeout after ${timeoutSeconds}s]", elapsed)
-    }
-    return ProcessResult(proc.exitValue(), out, err, elapsed)
-}
-
-internal data class ProcessResult(
-    val exitCode: Int,
-    val stdout: String,
-    val stderr: String,
-    val elapsedSeconds: Double,
-)
+private fun runClaude(cmd: List<String>, cwd: Path, timeoutSeconds: Long): ProcessResult =
+    runProcess(
+        cmd = cmd,
+        cwd = cwd,
+        timeoutSeconds = timeoutSeconds,
+        // The plan-2 design uses the Claude Code subscription (5-hour
+        // window, OAuth-based) for `claude -p`, with DeepSeek as the
+        // rate-limit fallback. If ANTHROPIC_API_KEY is in the parent env
+        // (set by the host CLI session, say), claude -p prefers it over
+        // the subscription token and returns HTTP 401 if it's not a valid
+        // paid API key. Strip it so the OAuth path always wins.
+        envScrub = listOf("ANTHROPIC_API_KEY"),
+        afterStart = { proc ->
+            // Newer claude -p versions block ~3s waiting for stdin even
+            // when the prompt is a positional arg, then emit "no stdin
+            // data received in 3s" and (in some versions) exit non-zero.
+            // Close stdin so claude proceeds immediately.
+            proc.outputStream.close()
+        },
+    )
 
 /**
  * Invoke claude -p with the JetBrains skill.
@@ -172,11 +168,11 @@ fun invokeSkill(
         add(userPrompt)
     }
 
-    var pr = runProcess(cmd, cwd, cfg.gradle.timeoutSeconds)
+    var pr = runClaude(cmd, cwd, cfg.gradle.timeoutSeconds)
     var rateLimited = looksRateLimited(pr.stdout, pr.stderr)
     if (rateLimited && onRateLimit == "sleep") {
         sleepUntilWindowReset(pr.stdout, pr.stderr)
-        pr = runProcess(cmd, cwd, cfg.gradle.timeoutSeconds)
+        pr = runClaude(cmd, cwd, cfg.gradle.timeoutSeconds)
         rateLimited = looksRateLimited(pr.stdout, pr.stderr)
     }
 
@@ -225,11 +221,11 @@ fun invokeSkillOneShot(
         addAll(cfg.claude.extraArgs)
         add(userPrompt)
     }
-    var pr = runProcess(cmd, cwd, cfg.gradle.timeoutSeconds)
+    var pr = runClaude(cmd, cwd, cfg.gradle.timeoutSeconds)
     var rateLimited = looksRateLimited(pr.stdout, pr.stderr)
     if (rateLimited && cfg.claude.pauseOnRateLimit) {
         sleepUntilWindowReset(pr.stdout, pr.stderr)
-        pr = runProcess(cmd, cwd, cfg.gradle.timeoutSeconds)
+        pr = runClaude(cmd, cwd, cfg.gradle.timeoutSeconds)
         rateLimited = looksRateLimited(pr.stdout, pr.stderr)
     }
     return SkillResult(

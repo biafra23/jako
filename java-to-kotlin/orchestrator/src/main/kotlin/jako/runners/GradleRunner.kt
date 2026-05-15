@@ -3,7 +3,6 @@ package jako.runners
 import jako.Config
 import java.nio.file.Files
 import java.nio.file.Path
-import java.util.concurrent.TimeUnit
 
 /**
  * Gradle compile + test gate — phase 2.3.
@@ -44,28 +43,18 @@ fun compileAndTest(cfg: Config): GradleResult {
     val tasks = shellSplit(taskStr)
     val cmd = listOf(wrapper.toString()) + tasks
 
-    val t0 = System.currentTimeMillis()
-    val pb = ProcessBuilder(cmd).directory(cfg.projectRoot().toFile()).redirectErrorStream(false)
-    val proc = pb.start()
-    val out = proc.inputStream.bufferedReader().readText()
-    val err = proc.errorStream.bufferedReader().readText()
-    val finished = proc.waitFor(cfg.gradle.timeoutSeconds, TimeUnit.SECONDS)
-    val elapsed = (System.currentTimeMillis() - t0) / 1000.0
-    if (!finished) {
-        proc.destroyForcibly()
-        return GradleResult(
-            ok = false, cmd = cmd, elapsedSeconds = elapsed, exitCode = -1,
-            stdoutTail = out.takeLast(2000),
-            stderrTail = "gradle timed out after ${cfg.gradle.timeoutSeconds}s",
-        )
-    }
-    return GradleResult(
-        ok = proc.exitValue() == 0,
+    val pr = runProcess(
         cmd = cmd,
-        elapsedSeconds = elapsed,
-        exitCode = proc.exitValue(),
-        stdoutTail = out.takeLast(4000),
-        stderrTail = err.takeLast(4000),
+        cwd = cfg.projectRoot(),
+        timeoutSeconds = cfg.gradle.timeoutSeconds,
+    )
+    return GradleResult(
+        ok = pr.exitCode == 0,
+        cmd = cmd,
+        elapsedSeconds = pr.elapsedSeconds,
+        exitCode = pr.exitCode,
+        stdoutTail = pr.stdout.takeLast(4000),
+        stderrTail = pr.stderr.takeLast(4000),
     )
 }
 

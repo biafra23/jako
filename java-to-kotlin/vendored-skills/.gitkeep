@@ -1,0 +1,10 @@
+# Add the upstream JetBrains skills as a submodule:
+#
+#   git submodule add https://github.com/Kotlin/kotlin-agent-skills.git vendored-skills/upstream
+#
+# Then symlink the skills directory or point config.yaml's `skills.root`
+# at vendored-skills/upstream/skills.
+#
+# We pin to a specific commit; phase 2.2 reads SKILL.md directly via
+# --append-system-prompt-file, so a submodule bump is the only way the
+# refinement prompt changes.

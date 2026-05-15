@@ -1,16 +1,20 @@
-# Pipeline runtime artifacts
-java-to-kotlin/state/
-java-to-kotlin/output/
+# Build outputs
+.gradle/
+build/
+out/
+**/*.class
+**/*.jar
 
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
-.venv/
-venv/
-
-# Editor / OS
-.DS_Store
+# IDE / editor
 .idea/
+*.iml
 .vscode/
-*.swp
+.fleet/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs and ephemeral state
+*.log
+state/

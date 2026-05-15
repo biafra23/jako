@@ -1,0 +1,45 @@
+# Curated map of common JVM-only dependencies -> Kotlin Multiplatform equivalents.
+# Phase 0 reads this to flag dependencies that need swapping in Phase 1's
+# generated build.gradle.kts. Add entries as you encounter them.
+#
+# Schema:
+#   <gradle coordinate prefix>:
+#     replace_with: <kmp coordinate or null if no equivalent>
+#     notes: <short string>
+#     status: replace | keep_jvm_only | manual
+
+mappings:
+  "com.google.guava:guava":
+    replace_with: null
+    notes: "No 1:1 KMP equivalent. Use kotlin stdlib + kotlinx-collections where possible."
+    status: manual
+
+  "org.slf4j:slf4j-api":
+    replace_with: "io.github.oshai:kotlin-logging"
+    notes: "kotlin-logging is multiplatform and bridges to slf4j on JVM."
+    status: replace
+
+  "junit:junit":
+    replace_with: "org.jetbrains.kotlin:kotlin-test"
+    notes: "Use kotlin.test for commonTest; jvmTest can keep JUnit if needed."
+    status: replace
+
+  "org.junit.jupiter:junit-jupiter":
+    replace_with: "org.jetbrains.kotlin:kotlin-test"
+    notes: "Same as junit:junit. Selectively keep JUnit 5 for JVM-specific tests."
+    status: replace
+
+  "com.fasterxml.jackson.core:jackson-databind":
+    replace_with: "org.jetbrains.kotlinx:kotlinx-serialization-json"
+    notes: "kotlinx.serialization is the KMP-native option."
+    status: replace
+
+  "org.apache.commons:commons-lang3":
+    replace_with: null
+    notes: "Most utilities have stdlib equivalents. Audit per-call-site."
+    status: manual
+
+  "io.netty:netty-all":
+    replace_with: null
+    notes: "JVM-only; stay in jvmMain."
+    status: keep_jvm_only

@@ -2,7 +2,7 @@
 
 A leaner alternative to the original plan. Same end goal (Java/Gradle project → working Kotlin Multiplatform project, tests stay in Java during migration), but instead of building the conversion engine ourselves, we orchestrate three things JetBrains already maintains:
 
-1. **The JetBrains J2K converter** — the same engine IntelliJ uses, also wrapped by the new `Kotlin/j2k-vscode` extension. Handles ~70-85% of mechanical Java → Kotlin translation deterministically.
+1. **The JetBrains J2K converter** — the same engine IntelliJ uses for "Convert Java File to Kotlin File." Handles ~70-85% of mechanical Java → Kotlin translation deterministically, with zero LLM involvement.
 2. **The `Kotlin/kotlin-agent-skills` repository** — JetBrains' official collection of agent skills. The `kotlin-tooling-java-to-kotlin` skill is the prompt-engineering layer for the LLM-driven idiomatic refinement step. The `kotlin-tooling-agp9-migration` skill is reusable later.
 3. **Claude Code CLI (`claude -p`)** — the agent runtime that loads those skills and drives the file-by-file refinement.
 
@@ -23,7 +23,7 @@ The principle is unchanged: **deterministic-first, LLM second, JetBrains owns th
 | 0.5 Dependency mapping table (KMP-equivalent libraries) | **Keep.** Curated YAML. |
 | 1.1 Generate KMP `build.gradle.kts` | **Keep.** Templating, no AI. |
 | 1.2 Move `.java` files into `jvmMain/java` | **Keep.** Pure scripting. |
-| 2.1 First pass: J2K | **Keep, but use the headless invocation pattern from `j2k-vscode`** rather than calling J2K's internal API directly. |
+| 2.1 First pass: J2K | **Keep.** Invoke the JetBrains converter via headless IntelliJ — a small custom `ApplicationStarter` plugin around `JavaToKotlinAction` / `J2kConverter`. Pure mechanical conversion, no LLM. |
 | 2.2 Second pass: idiomatic refinement (custom prompts per tier) | **Replace.** Use `claude -p` with the JetBrains `kotlin-tooling-java-to-kotlin` skill. We do not author prompts. |
 | 2.3 Compile + test gate | **Keep.** This is the safety net and it's ours. |
 | 2.4 Cycles | **Keep.** SCC handling stays our responsibility. |
@@ -91,19 +91,27 @@ For a non-Android JVM project this step is skipped.
 
 ## Phase 2 — File-by-file conversion (the heart of Plan 2)
 
-Per file, in `convert-order.json` order:
+Per file, in `convert-order.json` order. The risk tier (LOW / MEDIUM / HIGH) from Phase 0.4 is the input that selects which backends are eligible.
+
+### Per-file backend chain (canonical order)
+
+Every file walks the same ordered chain. The first backend in the list that is (a) configured, (b) reachable / has quota, and (c) eligible for the file's risk tier wins. If that backend errors at runtime, the orchestrator moves to the next eligible one. A file is only marked `failed` after the entire chain is exhausted.
+
+1. **J2K** — JetBrains headless converter (§2.1). Mechanical, no LLM. Runs on **every file regardless of risk tier**. If J2K is not configured / not reachable, this step is a no-op (the `.kt` starts as a passthrough of the `.java` text) and the chain proceeds to step 2.
+2. **Local LLM** — only for **LOW**-effort files, only when `localModel.enabled = true` and the endpoint passed the run-start reachability probe (§2.2). LM Studio / Ollama / vLLM / any OpenAI-compatible server. Same JetBrains skill as system prompt. If it errors on a given file, the chain proceeds to step 3 for that file.
+3. **Claude** — per risk tier: Haiku (LOW) / Sonnet (MEDIUM) / Opus (HIGH). Same JetBrains skill via `--append-system-prompt-file`. The default backend for everything that didn't get handled by J2K alone or by the local LLM.
+4. **DeepSeek v4** — used only when Claude reports its 5-hour subscription window is exhausted, and only when a DeepSeek API key is configured *and* the account has credits. Same JetBrains skill as system prompt. Once the Claude window resets, the orchestrator returns to step 3 for subsequent files (controlled by `fallback.returnToClaudeAfterWindow`).
+5. **Wait** — if DeepSeek is not available (no key, no credits, or hard error), the orchestrator parks the run until the Claude 5-hour window resets, then resumes at step 3. State is persisted so a process restart in the middle of the wait is harmless.
+
+Steps 2–5 all consume the *same* skill prompt and emit the *same* output shape (a refined `.kt` file written to disk). The orchestrator does not author Java→Kotlin prompts of its own for any backend.
 
 ### 2.1 Headless J2K (deterministic first pass)
-Same as Plan 1. Two viable invocation strategies:
 
-- **Option A — Headless IntelliJ.** Use `idea.sh` in headless mode with a tiny IntelliJ plugin or a pre-existing community wrapper that calls `JavaToKotlinAction`. Meta did this internally.
-- **Option B — Re-use the `j2k-vscode` engine.** The `Kotlin/j2k-vscode` extension is open-source and Apache-licensed; its conversion-engine entry point is invokable from a Node.js process. Wrap it in a small CLI shim.
+Invoke the JetBrains J2K converter headlessly via IntelliJ's `ApplicationStarter` extension point. We ship a small Kotlin/Java plugin (a few classes) that registers a starter command and, given a Java file path, calls `JavaToKotlinAction` / `J2kConverter` against it and writes the `.kt` output. The orchestrator drives this with `idea.sh ourCommand <java_in> <kt_out>` per file. Meta did this internally; the community has a few wrappers we can reference.
 
-Option B is preferred — it's smaller, faster to start, and tracks the upstream engine. Option A is the fallback if the VS Code extension's engine turns out to be hard to extract.
+This step is purely mechanical — J2K does AST-level translation only, no LLM, fully reproducible. The output is a `.kt` file that compiles syntactically but is non-idiomatic; step 2.2 (the LLM refinement) makes it idiomatic.
 
-**Critical clarification:** the `j2k-vscode` extension *does* its own LLM call internally for the idiomatic-refinement step (it supports OpenAI / OpenRouter / Ollama / GitHub Copilot, no Anthropic provider yet). For Plan 2 we want to **use only its mechanical-translation pass**, not its LLM step, so that step 2.2 (below) can use Claude via the skill. If the extension can't easily be split this way, fall back to Option A (headless IntelliJ J2K — pure mechanical conversion, no LLM involved).
-
-Output: a `.kt` file that compiles syntactically but is non-idiomatic.
+If J2K is unavailable for any reason (plugin not built, `idea.sh` not on disk, conversion errors out), the orchestrator falls through to step 2.2 with the `.kt` initialised as a verbatim copy of the `.java` text. The refinement step then does the entire conversion. This costs more LLM tokens per file but keeps the pipeline runnable on systems where IntelliJ isn't installed.
 
 ### 2.2 Idiomatic refinement via JetBrains skill + Claude
 
@@ -127,11 +135,34 @@ claude -p \
 
 Model selection table (from Phase 0.4):
 
-| Risk tier | Model |
-|---|---|
-| LOW | `claude-haiku-4-5-20251001` |
-| MEDIUM | `claude-sonnet-4-6` |
-| HIGH | `claude-opus-4-7` |
+| Risk tier | Default model | Optional override |
+|---|---|---|
+| LOW | `claude-haiku-4-5-20251001` | local model via LM Studio / Ollama / any OpenAI-compatible endpoint (see below) |
+| MEDIUM | `claude-sonnet-4-6` | — |
+| HIGH | `claude-opus-4-7` | — |
+
+#### Local-LLM tier for LOW-effort files (chain step 2)
+
+Configurable, off by default. When the user has a local OpenAI-compatible endpoint (LM Studio, Ollama, llama.cpp server, vLLM, etc.) and `localModel.enabled = true` in `config.yaml`, the orchestrator routes **LOW-risk files only** to the local model. The skill markdown is the system prompt — the local model gets the same JetBrains conventions Claude does.
+
+Gating rules:
+
+- **Reachability probe at phase-2 start.** A single GET to `/v1/models` (short timeout) on the configured base URL. If it fails, the orchestrator logs that local-model is unreachable and skips this chain step for the whole run. One decision per run, not per file.
+- **Per-file fallback on failure.** If the local model errors mid-conversion (HTTP 5xx, parse failure on the returned code block, timeout), the orchestrator moves that file to chain step 3 (Claude Haiku). Phase 2's existing three-strike retry loop absorbs the extra attempt.
+- **Skill prompt only.** No bespoke prompts for the local backend. Same `kotlin-tooling-java-to-kotlin/SKILL.md` as system prompt; same short user prompt with interop constraints. If a particular local model struggles with the skill, the answer is "don't route LOW to that model" — not "write a custom prompt for it."
+- **MEDIUM and HIGH never go local.** The risk tier exists precisely because those files need a stronger model. Routing them to a local 30B-parameter Gemma defeats the point of having tiers.
+
+Why route LOW here: LOW files are the cheapest place to validate a local backend (small, mostly-mechanical conversions; if the local model botches one, retrying on Haiku costs ~nothing). It also stretches a Claude Max subscription further by burning the cheapest tier on a model you pay nothing per-token for.
+
+#### Claude rate-limit fallback (chain steps 4 & 5)
+
+The `claude -p` subscription has a 5-hour usage window. When that window is exhausted the CLI returns a recognisable message (regex-matched on `rate.?limit|5.?hour|usage.?limit|quota.?exhaust|try again at`; exit codes are unreliable across CLI versions, so we match the text). The orchestrator's response:
+
+- If `fallback.deepseek.enabled = true` and the DeepSeek API key env var is set, route the current file (and all subsequent files until the window resets) to **DeepSeek v4** via its OpenAI-compatible `/v1/chat/completions` endpoint. Same skill as system prompt; the model is asked to return the full `.kt` inside a fenced ```kotlin block, which the orchestrator extracts and writes to disk.
+- If DeepSeek is not configured / not reachable, **park the run** until the Claude window resets (parsed from the CLI message when it includes `try again at HH:MM`; otherwise default to a 1-hour sleep, retry, repeat). The run-state JSON persists across the sleep so a `Ctrl-C` and re-launch resumes cleanly.
+- When the Claude window resets (clock-based; `fallback.returnToClaudeAfterWindow = true` by default), subsequent files go back to step 3 of the chain. DeepSeek is only used while the window is closed.
+
+DeepSeek is intentionally *not* used for general Claude failures (bad prompt, hard file, parse error). Those go through phase 2's three-strike retry on the same backend — switching providers won't help.
 
 Three things to notice about this step compared to Plan 1:
 
@@ -185,25 +216,13 @@ Same JetBrains skill, same orchestrator loop, just pointed at `src/jvmTest/java/
 
 ---
 
-## What changes if `j2k-vscode` adds an Anthropic provider
-
-The `j2k-vscode` extension currently supports OpenAI, OpenRouter, Ollama, and GitHub Copilot as LLM backends — no Anthropic. If that changes (or someone — possibly us — submits a PR adding a Claude provider), the calculus shifts:
-
-- Phase 2.1 and 2.2 collapse into a single `j2k-vscode` invocation with Claude as the configured backend.
-- The orchestrator's job shrinks further: drive the extension headlessly per file, wrap it in our compile/test/commit loop.
-- We lose the model-tiering control unless `j2k-vscode` exposes per-call model selection. That may or may not be worth giving up; for a small project it's fine, for a 100k-file project the cost difference between Haiku and Opus is real.
-
-This is worth tracking but not worth blocking on. Ship Plan 2 against the JetBrains skill first.
-
----
-
 ## Risks specific to Plan 2
 
 | Risk | Mitigation |
 |---|---|
 | The `kotlin-tooling-java-to-kotlin` skill changes shape and breaks our invocation | Pin the submodule to a specific commit. Bump deliberately, with regression fixtures. |
 | The skill's `description` triggers on cases we don't want, or doesn't trigger when we do | Use Path A (`--append-system-prompt-file`) which is unconditional, not Path B (auto-discovery) until behavior is well understood. |
-| Headless J2K is harder to drive than expected | Have both Option A (IntelliJ headless) and Option B (`j2k-vscode` engine) as candidates; pick whichever extracts cleanly first. |
+| Headless J2K is harder to drive than expected | The `ApplicationStarter` plugin is the only path. Mitigate by referencing community wrappers and keeping the plugin tiny (one entry point that takes two file paths). If even this proves intractable, the fallback is to skip J2K entirely and let the JetBrains skill convert from raw Java in step 2.2 — slower per file but unblocks the migration. |
 | The skill assumes IntelliJ context (it can call IntelliJ refactorings) that aren't available to Claude Code | Read the SKILL.md before vendoring. If the skill is IntelliJ-coupled, fall back to a plain `claude -p` with a short, hand-written user prompt for Phase 2.2 only. The other phases are unaffected. |
 | JetBrains discontinues or relicenses the skills repo | The submodule is pinned; we keep working off the pinned commit. Worst case, we fork. |
 

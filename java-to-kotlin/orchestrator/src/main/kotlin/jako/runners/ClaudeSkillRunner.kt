@@ -104,8 +104,20 @@ private fun sleepUntilWindowReset(stdout: String, stderr: String) {
 
 private fun runProcess(cmd: List<String>, cwd: Path, timeoutSeconds: Long): ProcessResult {
     val pb = ProcessBuilder(cmd).directory(cwd.toFile()).redirectErrorStream(false)
+    // The plan-2 design uses the Claude Code subscription (5-hour window,
+    // OAuth-based) for `claude -p`, with DeepSeek as the rate-limit fallback.
+    // If ANTHROPIC_API_KEY is present in the parent env (set, say, by the
+    // CLI session itself), claude -p prefers it over the subscription token
+    // and returns HTTP 401 if it's not a valid paid API key. Strip it from
+    // the subprocess env so the OAuth subscription path always wins.
+    pb.environment().remove("ANTHROPIC_API_KEY")
     val t0 = System.currentTimeMillis()
     val proc = pb.start()
+    // Newer claude -p versions block ~3s waiting for stdin even when the
+    // prompt is a positional arg, then emit "no stdin data received in 3s"
+    // and (in some versions) exit non-zero. Close stdin so claude proceeds
+    // immediately and the warning never appears.
+    proc.outputStream.close()
     val out = proc.inputStream.bufferedReader().readText()
     val err = proc.errorStream.bufferedReader().readText()
     val finished = proc.waitFor(timeoutSeconds, TimeUnit.SECONDS)

@@ -63,7 +63,7 @@ data class ClaudeCfg(
         "MEDIUM" to "claude-sonnet-4-6",
         "HIGH" to "claude-opus-4-7",
     ),
-    @SerialName("max_turns") val maxTurns: Int = 3,
+    @SerialName("max_turns") val maxTurns: Int = 10,
     @SerialName("permission_mode") val permissionMode: String = "acceptEdits",
     @SerialName("extra_args") val extraArgs: List<String> = emptyList(),
     @SerialName("pause_on_rate_limit") val pauseOnRateLimit: Boolean = true,

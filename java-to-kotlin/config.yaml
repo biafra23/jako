@@ -19,7 +19,10 @@ claude:
     LOW: claude-haiku-4-5-20251001
     MEDIUM: claude-sonnet-4-6
     HIGH: claude-opus-4-7
-  max_turns: 3
+  # Read .java + Read .kt + Edit/Write .kt + (optional) Read-back verify
+  # is already 3-4 turns on any non-trivial file. 10 gives headroom for the
+  # skill to chain a couple of edits without false `error_max_turns`.
+  max_turns: 10
   permission_mode: acceptEdits
   extra_args: []
   pause_on_rate_limit: true

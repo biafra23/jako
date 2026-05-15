@@ -81,9 +81,22 @@ private fun attemptGroup(
     log: (String) -> Unit,
 ): Boolean {
     // Step 1 — J2K mechanical pass.
+    // J2K success deletes the original .java (stashed alongside the .kt as
+    // a .java.bak). If a previous attempt in this run already did the
+    // mechanical pass, the .java is gone — re-running J2K would fail with
+    // "no such file". The presence of `<kt>.java.bak` next to the .kt is
+    // the canonical signal that J2K already ran for this unit; check it
+    // directly rather than relying on state.status (which gets overwritten
+    // to "failed" by the refine/verify steps).
     val ktTargets = mutableListOf<Path>()
     for (u in units) {
         val kt = ktTargetFor(cfg, u)
+        val javaBak = kt.parent.resolve(kt.fileName.toString() + ".java.bak")
+        if (Files.exists(kt) && Files.size(kt) > 0 && Files.exists(javaBak)) {
+            log("${ts()} j2k    skipped (already converted): ${u.relativePath}")
+            ktTargets.add(kt)
+            continue
+        }
         log("${ts()} j2k    ${u.relativePath} -> ${kt.relativeToOrSelf(cfg.projectRoot())}")
         val r = convertJ2K(cfg, Path.of(u.sourcePath), kt)
         if (!r.ok) {

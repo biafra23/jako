@@ -43,9 +43,10 @@ import kotlin.io.path.walk
 // Configuration alternatives are ordered longest-first so e.g. `compileOnly`
 // is matched before its prefix `compile` (\b doesn't help here because
 // `\b` looks for a word↔non-word transition, and `compileOnly` is all
-// word chars).
+// word chars). The legacy `testCompile` / `testRuntime` / `compile` names
+// were removed in Gradle 7 but appear in older real-world projects.
 private const val CONFIG_NAMES =
-    "testImplementation|testCompileOnly|testRuntimeOnly|annotationProcessor|compileOnly|runtimeOnly|implementation|api|compile"
+    "testImplementation|testCompileOnly|testRuntimeOnly|testCompile|testRuntime|annotationProcessor|compileOnly|runtimeOnly|implementation|api|compile"
 
 // Match `<config> "<coord>"` and `<config>("<coord>")` — Groovy DSL and
 // the standard Kotlin DSL form.
@@ -56,6 +57,14 @@ private val depRegexBare = Regex("""\b($CONFIG_NAMES)\b[\s\(]+["']([^"'\s]+)["']
 // analyze on an already-scaffolded module finds no deps.
 private val depRegexStringConfig =
     Regex("""["']($CONFIG_NAMES)["']\s*\(\s*["']([^"'\s]+)["']""")
+
+// Match inter-module project deps: `implementation project(':foo')` (Groovy)
+// or `implementation(project(":foo"))` (Kotlin DSL). The coordinate gets
+// prefixed with `project:` so consumers can distinguish from Maven coords.
+// Map-style deps (`group:, name:, version:`) and version-catalog deps
+// (`libs.foo`) are not yet parsed — add as encountered.
+private val depRegexProject =
+    Regex("""\b($CONFIG_NAMES)\b\s*\(?\s*project\s*\(\s*["']([^"']+)["']\s*\)""")
 
 private val agpPluginRegex = Regex("""\bid\s*\(?\s*["']com\.android\.""")
 
@@ -82,8 +91,11 @@ fun extractBuildModel(cfg: Config): BuildModel {
     val testRoot = testCandidates.firstOrNull { it.exists() }
 
     val text = readBuildFiles(root, module)
-    val deps = (depRegexBare.findAll(text) + depRegexStringConfig.findAll(text))
+    val mavenLike = (depRegexBare.findAll(text) + depRegexStringConfig.findAll(text))
         .map { GradleDep(configuration = it.groupValues[1], coordinate = it.groupValues[2]) }
+    val projectLike = depRegexProject.findAll(text)
+        .map { GradleDep(configuration = it.groupValues[1], coordinate = "project:${it.groupValues[2]}") }
+    val deps = (mavenLike + projectLike)
         .toSet()
         .sortedWith(compareBy({ it.configuration }, { it.coordinate }))
     val usesAgp = agpPluginRegex.containsMatchIn(text)

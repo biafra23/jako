@@ -117,8 +117,18 @@ private fun printHelp() {
 internal fun loadOrAnalyze(cfg: Config, force: Boolean): AnalysisResult {
     val stateDir = cfg.stateDir()
     val bmFile = stateDir.resolve("build-model.json")
-    return if (!force && Files.exists(bmFile)) AnalysisResult.read(stateDir)
-    else runAnalyze(cfg)
+    if (force || !Files.exists(bmFile)) return runAnalyze(cfg)
+    // The state JSON shape evolves across versions (e.g. GradleDep replacing
+    // a plain List<String>). If decoding fails, re-analyze instead of
+    // aborting — the state dir is gitignored and cheap to regenerate.
+    return try {
+        AnalysisResult.read(stateDir)
+    } catch (e: Exception) {
+        System.err.println(
+            "[analyze] cached state at $stateDir is incompatible (${e.message?.lineSequence()?.firstOrNull()}); re-analyzing.",
+        )
+        runAnalyze(cfg)
+    }
 }
 
 internal fun loadState(cfg: Config, force: Boolean): RunState {

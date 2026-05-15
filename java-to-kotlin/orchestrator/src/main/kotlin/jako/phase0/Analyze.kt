@@ -290,12 +290,14 @@ private fun topoSort(sccs: List<List<String>>, adj: Map<String, Set<String>>): L
     val condAdj = (0 until sccs.size).associateWith { mutableSetOf<Int>() }
     val indeg = (0 until sccs.size).associateWith { 0 }.toMutableMap()
     for ((u, outs) in adj) for (v in outs) {
-        val a = nodeToScc[u]!!; val b = nodeToScc[v]!!
+        val a = nodeToScc.getValue(u); val b = nodeToScc.getValue(v)
+        if (a == b) continue
         // u depends on v ⇒ a depends on b. Record the inverse edge
-        // (b → a) for Kahn so we can release a once b is done.
-        if (a != b && a !in condAdj[b]!!) {
-            condAdj[b]!!.add(a); indeg[a] = indeg[a]!! + 1
-        }
+        // (b → a) for Kahn so we can release a once b is done. Cache the
+        // adjacency set so the inner loop hits the map once per edge,
+        // not three times.
+        val dependers = condAdj.getValue(b)
+        if (dependers.add(a)) indeg[a] = indeg.getValue(a) + 1
     }
     val ready = ArrayDeque(
         indeg.filterValues { it == 0 }.keys.sortedBy { sccs[it].min() }

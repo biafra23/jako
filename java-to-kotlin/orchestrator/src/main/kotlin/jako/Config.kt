@@ -67,6 +67,10 @@ data class ClaudeCfg(
     @SerialName("permission_mode") val permissionMode: String = "acceptEdits",
     @SerialName("extra_args") val extraArgs: List<String> = emptyList(),
     @SerialName("pause_on_rate_limit") val pauseOnRateLimit: Boolean = true,
+    /** Maximum simultaneous `claude -p` subprocesses Phase 2 will run when
+     *  refining a batch (SCC or `--only` set). 1 = serial. Going much above
+     *  6 risks tripping the Claude subscription per-minute rate limit. */
+    val concurrency: Int = 4,
 )
 
 @Serializable

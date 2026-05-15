@@ -29,6 +29,10 @@ claude:
   permission_mode: acceptEdits
   extra_args: []
   pause_on_rate_limit: true
+  # Parallel `claude -p` calls inside a single refine pass. The Claude
+  # subscription has a per-minute throughput cap; staying ≤ 6 keeps us
+  # well under it. Set to 1 for serial / debugging.
+  concurrency: 4
 
 j2k:
   # Per-file backend chain step 1. See plan §Phase 2.

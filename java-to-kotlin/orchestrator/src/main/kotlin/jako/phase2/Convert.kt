@@ -10,6 +10,13 @@ import jako.runners.compileAndTest
 import jako.runners.convertJ2K
 import jako.runners.describeJ2K
 import jako.runners.discardUnstaged
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.LocalTime
@@ -50,6 +57,76 @@ private fun ktTargetFor(cfg: Config, unit: JavaSourceUnit): Path {
     }
     val ktRel = rel.toString().removeSuffix(".java") + ".kt"
     return root.resolve("src/$srcSet/kotlin").resolve(ktRel)
+}
+
+/**
+ * One refine outcome surfaced from a parallel batch. Kept separate from
+ * `state.mark(...)` calls so all state mutations happen sequentially on
+ * the main thread after `awaitAll()` — `RunState` is not thread-safe.
+ */
+private data class RefineOutcome(
+    val unit: JavaSourceUnit,
+    val kt: Path,
+    val ok: Boolean,
+    val model: String,
+    val tail: String,
+)
+
+/**
+ * Mirror of the chain-step ordering inside `refine(...)`, used only to
+ * label the model in a failure outcome when an exception bubbled out
+ * before any backend ran. Keeps RunState honest about *intent* rather
+ * than tagging the unit with the sentinel "?" model.
+ */
+private fun intendedModelFor(cfg: Config, refineState: RefineState, risk: String): String =
+    when {
+        risk == "LOW" && cfg.localModel.enabled && refineState.localReachable ->
+            "local:${cfg.localModel.model}"
+        !refineState.claudeAvailable() && cfg.fallback.enabled ->
+            "deepseek:${cfg.fallback.deepseek.model}"
+        else -> cfg.claude.models[risk] ?: cfg.claude.defaultModel
+    }
+
+/**
+ * Fan out one refine call per item with bounded concurrency. Logs are
+ * `println` underneath (thread-safe). Catches exceptions and surfaces them
+ * as `ok=false` outcomes so a single backend hiccup doesn't poison the
+ * whole batch.
+ */
+private fun parallelRefine(
+    cfg: Config,
+    refineState: RefineState,
+    items: List<Triple<JavaSourceUnit, Path, String>>,
+    log: (String) -> Unit,
+): List<RefineOutcome> {
+    if (items.isEmpty()) return emptyList()
+    val concurrency = maxOf(1, cfg.claude.concurrency)
+    return runBlocking {
+        val sem = Semaphore(concurrency)
+        coroutineScope {
+            items.map { (u, kt, extra) ->
+                async(Dispatchers.IO) {
+                    sem.withPermit {
+                        log("${ts()} refine ${kt.relativeToOrSelf(cfg.projectRoot())} (risk=${u.risk})")
+                        runCatching { refineOne(cfg, refineState, u, kt, extra) }
+                            .fold(
+                                onSuccess = { (ok, model, tail) ->
+                                    RefineOutcome(u, kt, ok, model, tail)
+                                },
+                                onFailure = { e ->
+                                    // Compute the model we would have picked
+                                    // had the call reached a backend, so RunState
+                                    // shows an accurate intended-model name
+                                    // rather than the misleading "?" sentinel.
+                                    val intendedModel = intendedModelFor(cfg, refineState, u.risk)
+                                    RefineOutcome(u, kt, false, intendedModel, "exception: ${e.message ?: e.javaClass.simpleName}")
+                                },
+                            )
+                    }
+                }
+            }.awaitAll()
+        }
+    }
 }
 
 private fun refineOne(
@@ -123,19 +200,26 @@ private fun attemptGroup(
     }
     state.save()
 
-    // Step 2 — refinement via backend chain.
-    for ((u, kt) in units.zip(ktTargets)) {
-        log("${ts()} refine ${kt.relativeToOrSelf(cfg.projectRoot())} (risk=${u.risk})")
-        val (ok, model, tail) = refineOne(cfg, refineState, u, kt)
-        state.mark(u.sourcePath, modelUsed = model)
-        if (!ok) {
-            log("${ts()} refine FAILED for ${u.relativePath}: ${tail.take(200)}")
-            state.mark(u.sourcePath, status = "failed", lastError = "refine: ${tail.take(500)}")
-            return false
+    // Step 2 — refinement via backend chain, fanned out across the batch
+    // up to `claude.concurrency` parallel claude/local/deepseek calls.
+    // For a 6-file SCC at concurrency=4 this drops a 6-minute serial refine
+    // pass to roughly 1.5 minutes. All state mutations stay on the calling
+    // thread (RunState is not thread-safe).
+    val refineItems = units.zip(ktTargets).map { (u, kt) -> Triple(u, kt, "") }
+    val outcomes = parallelRefine(cfg, refineState, refineItems, log)
+    var anyFailed = false
+    for (o in outcomes) {
+        state.mark(o.unit.sourcePath, modelUsed = o.model)
+        if (!o.ok) {
+            log("${ts()} refine FAILED for ${o.unit.relativePath}: ${o.tail.take(200)}")
+            state.mark(o.unit.sourcePath, status = "failed", lastError = "refine: ${o.tail.take(500)}")
+            anyFailed = true
+        } else {
+            state.mark(o.unit.sourcePath, status = "refined")
         }
-        state.mark(u.sourcePath, status = "refined")
     }
     state.save()
+    if (anyFailed) return false
 
     // Step 3 — gradle compile + test gate.
     log("${ts()} gradle compile + test")
@@ -164,16 +248,49 @@ private fun attemptGroup(
         return false
     }
 
-    // One auto-retry with the error inlined into the user prompt.
-    for ((u, kt) in units.zip(ktTargets)) {
-        log("${ts()} refine#2 with compiler-error context for ${u.relativePath}")
-        val (ok, model, tail) = refineOne(
-            cfg, refineState, u, kt,
-            extra = "[$tag] gradle output tail:\n$err",
-        )
-        state.mark(u.sourcePath, modelUsed = model)
-        if (!ok) {
-            state.mark(u.sourcePath, status = "failed", lastError = "refine#2: ${tail.take(500)}")
+    // Compile errors are usually surfaced per-file. Re-refining files that
+    // already compiled is wasted cost. Parse the kotlin compiler output to
+    // find which .kt files the compiler complained about, then refine#2
+    // only those, passing each unit its own file-specific error tail
+    // instead of the whole batch's. Falls back to re-refining everything
+    // when (a) the parser found nothing — test failure, unknown plugin
+    // output — OR (b) the parser found files but none match our batch
+    // (errors in generated sources, downstream modules, or a cousin
+    // package). Both cases would otherwise hand `parallelRefine` an empty
+    // list and burn the retry without invoking the LLM.
+    val perFileErrors: Map<Path, List<String>> = jako.runners.parsePerFileKotlinErrors(g)
+    val erroringKts: Set<Path> = perFileErrors.keys.map { it.toAbsolutePath().normalize() }.toSet()
+    val matched: List<Triple<JavaSourceUnit, Path, String>> = units.zip(ktTargets).mapNotNull { (u, kt) ->
+        val ktAbs = kt.toAbsolutePath().normalize()
+        if (ktAbs !in erroringKts) return@mapNotNull null
+        val diagBlock = perFileErrors[ktAbs]?.joinToString("\n\n") ?: ""
+        Triple(u, kt, "[$tag] kotlin diagnostics for this file:\n$diagBlock")
+    }
+    val refine2Items: List<Triple<JavaSourceUnit, Path, String>> = when {
+        erroringKts.isEmpty() -> {
+            log("${ts()} refine#2: no per-file errors parsed — re-refining all ${units.size} units with batch error tail")
+            units.zip(ktTargets).map { (u, kt) -> Triple(u, kt, "[$tag] gradle output tail:\n$err") }
+        }
+        matched.isEmpty() -> {
+            log(
+                "${ts()} refine#2: parser found ${erroringKts.size} erroring file(s) but none in this batch " +
+                    "(likely generated sources or a downstream module); re-refining all ${units.size} with batch tail",
+            )
+            units.zip(ktTargets).map { (u, kt) -> Triple(u, kt, "[$tag] gradle output tail:\n$err") }
+        }
+        else -> {
+            log(
+                "${ts()} refine#2: ${matched.size}/${units.size} units have compiler diagnostics " +
+                    "(others compiled OK — skipping them this pass)",
+            )
+            matched
+        }
+    }
+    val refine2Outcomes = parallelRefine(cfg, refineState, refine2Items, log)
+    for (o in refine2Outcomes) {
+        state.mark(o.unit.sourcePath, modelUsed = o.model)
+        if (!o.ok) {
+            state.mark(o.unit.sourcePath, status = "failed", lastError = "refine#2: ${o.tail.take(500)}")
             return false
         }
     }

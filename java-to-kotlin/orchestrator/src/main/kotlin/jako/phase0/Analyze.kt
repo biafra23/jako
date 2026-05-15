@@ -6,6 +6,7 @@ import com.github.javaparser.ast.body.TypeDeclaration
 import jako.AnalysisResult
 import jako.BuildModel
 import jako.Config
+import jako.GradleDep
 import jako.JavaSourceUnit
 import jako.fqcnIndex
 import java.nio.file.Files
@@ -35,12 +36,27 @@ import kotlin.io.path.walk
 // Gradle Tooling API would be cleaner but adds a heavy JVM dep (and a
 // version-compatibility matrix against the target project's Gradle). For
 // now we text-parse build.gradle / build.gradle.kts for the bits we need:
-// the dependency block and whether an AGP plugin is applied. Both consumers
-// (phase 1 KMP scaffolding, phase 1 AGP9 skill gate) are tolerant of
-// imperfect parsing.
-private val depRegex = Regex(
-    """\b(?:implementation|api|compile|runtimeOnly)\s*[\(\s]\s*["']([^"']+)["']"""
-)
+// the dependency block (configuration + coordinate, both preserved) and
+// whether an AGP plugin is applied. Both consumers (phase 1 KMP scaffolding,
+// phase 1 AGP9 skill gate) are tolerant of imperfect parsing.
+//
+// Configuration alternatives are ordered longest-first so e.g. `compileOnly`
+// is matched before its prefix `compile` (\b doesn't help here because
+// `\b` looks for a word↔non-word transition, and `compileOnly` is all
+// word chars).
+private const val CONFIG_NAMES =
+    "testImplementation|testCompileOnly|testRuntimeOnly|annotationProcessor|compileOnly|runtimeOnly|implementation|api|compile"
+
+// Match `<config> "<coord>"` and `<config>("<coord>")` — Groovy DSL and
+// the standard Kotlin DSL form.
+private val depRegexBare = Regex("""\b($CONFIG_NAMES)\b[\s\(]+["']([^"'\s]+)["']""")
+
+// Match `"<config>"("<coord>")` — the string-config form the orchestrator
+// emits in generated build.gradle.kts files. Without this, re-running
+// analyze on an already-scaffolded module finds no deps.
+private val depRegexStringConfig =
+    Regex("""["']($CONFIG_NAMES)["']\s*\(\s*["']([^"'\s]+)["']""")
+
 private val agpPluginRegex = Regex("""\bid\s*\(?\s*["']com\.android\.""")
 
 private fun readBuildFiles(projectRoot: Path, module: String): String {
@@ -56,19 +72,27 @@ fun extractBuildModel(cfg: Config): BuildModel {
     val module = cfg.project.module
     val modRoot = if (module.isNotBlank() && module != ".") root.resolve(module) else root
 
-    val mainRoot = modRoot.resolve("src/main/java")
-    val testRoot = modRoot.resolve("src/test/java")
-    if (!mainRoot.exists()) error("expected Java source root at $mainRoot")
+    // Accept either the pre-scaffold (src/main/java) or post-scaffold KMP
+    // layout (src/jvmMain/java). After phase 1 moves files, re-running
+    // analyze should still find them.
+    val mainCandidates = listOf("src/main/java", "src/jvmMain/java").map(modRoot::resolve)
+    val testCandidates = listOf("src/test/java", "src/jvmTest/java").map(modRoot::resolve)
+    val mainRoot = mainCandidates.firstOrNull { it.exists() }
+        ?: error("no Java source root under $modRoot (tried: ${mainCandidates.joinToString(", ")})")
+    val testRoot = testCandidates.firstOrNull { it.exists() }
 
     val text = readBuildFiles(root, module)
-    val deps = depRegex.findAll(text).map { it.groupValues[1] }.toSortedSet().toList()
+    val deps = (depRegexBare.findAll(text) + depRegexStringConfig.findAll(text))
+        .map { GradleDep(configuration = it.groupValues[1], coordinate = it.groupValues[2]) }
+        .toSet()
+        .sortedWith(compareBy({ it.configuration }, { it.coordinate }))
     val usesAgp = agpPluginRegex.containsMatchIn(text)
 
     return BuildModel(
         projectRoot = root.toString(),
         module = module,
         javaMainRoot = mainRoot.toString(),
-        javaTestRoot = if (testRoot.exists()) testRoot.toString() else null,
+        javaTestRoot = testRoot?.toString(),
         gradleDependencies = deps,
         pluginUsesAgp = usesAgp,
     )

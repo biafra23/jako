@@ -27,6 +27,10 @@ application {
     applicationName = "orchestrator"
 }
 
+tasks.named<JavaExec>("run") {
+    workingDir = rootProject.projectDir
+}
+
 tasks.test {
     useJUnitPlatform()
 }

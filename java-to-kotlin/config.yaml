@@ -74,7 +74,7 @@ git:
 # (LM Studio / Ollama / vLLM / llama.cpp server). Used ONLY for LOW-risk
 # files when enabled and the reachability probe at phase-2 start passes.
 local_model:
-  enabled: false
+  enabled: true
   base_url: http://localhost:1234/v1
   model: google/gemma-4-31b
   # Leave empty for typical local servers; set to env-var name (e.g.
@@ -89,7 +89,7 @@ local_model:
 # the orchestrator falls through to DeepSeek (if enabled and credits) or
 # parks until the window resets.
 fallback:
-  enabled: false              # flip to true once DEEPSEEK_API_KEY is exported
+  enabled: true               # DEEPSEEK_API_KEY env var must be set
   return_to_claude_after_window: true
   backend: deepseek
   deepseek:

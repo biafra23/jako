@@ -3,6 +3,8 @@ package jako.runners
 import jako.Config
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Calendar
@@ -184,9 +186,13 @@ fun invokeSkill(
     // (read-back verification, an extraneous gradle invocation, etc.).
     // Accept that outcome iff the .kt was actually written; the gradle
     // gate downstream is the real verdict on whether the file is good.
-    // Substring match on the small single-object JSON stdout is enough.
-    val exhaustedTurnsWithFile = ktWritten && "error_max_turns" in pr.stdout
-    val ok = (pr.exitCode == 0 || exhaustedTurnsWithFile) && ktWritten && !rateLimited
+    // Read the structured `subtype` field rather than substring-matching
+    // the raw stdout — the latter would false-positive on transcripts or
+    // metadata enums that happen to mention the string.
+    val maxTurnsExhausted = runCatching {
+        payload?.jsonObject?.get("subtype")?.jsonPrimitive?.content == "error_max_turns"
+    }.getOrDefault(false)
+    val ok = (pr.exitCode == 0 || (maxTurnsExhausted && ktWritten)) && ktWritten && !rateLimited
 
     return SkillResult(
         ok = ok,

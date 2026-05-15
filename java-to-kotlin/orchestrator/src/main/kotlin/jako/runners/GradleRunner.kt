@@ -76,20 +76,28 @@ fun compileAndTest(cfg: Config): GradleResult {
  * "A problem occurred evaluating root project") would otherwise fall through
  * to `unknown` and trigger a pointless refine retry.
  */
+// Plain-substring signals — fast, no regex compile, no metacharacter risk.
+private val BUILD_ENV_LITERALS = listOf(
+    "a problem occurred evaluating",            // config-time eval failures
+    "a problem occurred configuring",
+    "could not create task",                    // task registration threw
+    "is a duplicate but no duplicate handling", // duplicate jar entry
+    "could not resolve all dependencies",       // network / repo issue
+    "no notice file",                           // Tuweni :checkNotice flavor
+    "notice file is not up-to-date",
+    "license header",                           // spotless license-header guard
+)
+
+// Genuine regex patterns. Kept compiled, lowercase-matched. Add only when
+// a literal substring isn't expressive enough.
+private val BUILD_ENV_REGEXES = listOf(
+    Regex("""plugin .* not found"""),
+)
+
 fun classifyFailure(result: GradleResult): String {
     val blob = (result.stdoutTail + "\n" + result.stderrTail).lowercase()
-    val buildEnvSignals = listOf(
-        "a problem occurred evaluating",         // config-time eval failures
-        "a problem occurred configuring",
-        "could not create task",                 // task registration threw
-        "is a duplicate but no duplicate handling", // duplicate jar entry
-        "plugin .* not found",
-        "could not resolve all dependencies",    // network / repo issue
-        "no notice file",                        // Tuweni :checkNotice flavor
-        "notice file is not up-to-date",
-        "license header",                        // spotless license-header guard
-    )
-    if (buildEnvSignals.any { it.toRegex().containsMatchIn(blob) }) return "build_env"
+    if (BUILD_ENV_LITERALS.any { it in blob }) return "build_env"
+    if (BUILD_ENV_REGEXES.any { it.containsMatchIn(blob) }) return "build_env"
     return when {
         "unresolved reference" in blob -> "missing_import"
         "expecting an expression" in blob || "syntax error" in blob -> "syntax"

@@ -83,15 +83,25 @@ private fun attemptGroup(
     // J2K success deletes the original .java (stashed alongside the .kt as
     // a .java.bak). If a previous attempt in this run already did the
     // mechanical pass, the .java is gone — re-running J2K would fail with
-    // "no such file". The presence of `<kt>.java.bak` next to the .kt is
-    // the canonical signal that J2K already ran for this unit; check it
-    // directly rather than relying on state.status (which gets overwritten
-    // to "failed" by the refine/verify steps).
+    // "no such file". The canonical "J2K already ran for THIS unit" signal
+    // is the conjunction of three artifacts:
+    //   - the .kt exists and is non-empty,
+    //   - the matching `<kt>.java.bak` exists (J2K wrote it),
+    //   - the original .java at `u.sourcePath` is gone (J2K removed it).
+    // We check all three together rather than relying on state.status
+    // (which gets overwritten to "failed" by the refine/verify steps) or
+    // .bak alone (which could be a stale leftover from a rename / earlier
+    // workspace state with no matching current J2K run).
     val ktTargets = mutableListOf<Path>()
     for (u in units) {
         val kt = ktTargetFor(cfg, u)
         val javaBak = kt.parent.resolve(kt.fileName.toString() + ".java.bak")
-        if (Files.exists(kt) && Files.size(kt) > 0 && Files.exists(javaBak)) {
+        val originalJava = Path.of(u.sourcePath)
+        val j2kAlreadyDone =
+            Files.exists(kt) && Files.size(kt) > 0 &&
+            Files.exists(javaBak) &&
+            !Files.exists(originalJava)
+        if (j2kAlreadyDone) {
             log("${ts()} j2k    skipped (already converted): ${u.relativePath}")
             ktTargets.add(kt)
             continue

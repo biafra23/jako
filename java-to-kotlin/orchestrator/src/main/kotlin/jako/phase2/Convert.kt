@@ -10,7 +10,6 @@ import jako.runners.compileAndTest
 import jako.runners.convertJ2K
 import jako.runners.describeJ2K
 import jako.runners.discardUnstaged
-import jako.runners.revertLast
 import java.nio.file.Files
 import java.nio.file.Path
 import java.time.LocalTime
@@ -81,9 +80,32 @@ private fun attemptGroup(
     log: (String) -> Unit,
 ): Boolean {
     // Step 1 — J2K mechanical pass.
+    // J2K success deletes the original .java (stashed alongside the .kt as
+    // a .java.bak). If a previous attempt in this run already did the
+    // mechanical pass, the .java is gone — re-running J2K would fail with
+    // "no such file". The canonical "J2K already ran for THIS unit" signal
+    // is the conjunction of three artifacts:
+    //   - the .kt exists and is non-empty,
+    //   - the matching `<kt>.java.bak` exists (J2K wrote it),
+    //   - the original .java at `u.sourcePath` is gone (J2K removed it).
+    // We check all three together rather than relying on state.status
+    // (which gets overwritten to "failed" by the refine/verify steps) or
+    // .bak alone (which could be a stale leftover from a rename / earlier
+    // workspace state with no matching current J2K run).
     val ktTargets = mutableListOf<Path>()
     for (u in units) {
         val kt = ktTargetFor(cfg, u)
+        val javaBak = kt.parent.resolve(kt.fileName.toString() + ".java.bak")
+        val originalJava = Path.of(u.sourcePath)
+        val j2kAlreadyDone =
+            Files.exists(kt) && Files.size(kt) > 0 &&
+            Files.exists(javaBak) &&
+            !Files.exists(originalJava)
+        if (j2kAlreadyDone) {
+            log("${ts()} j2k    skipped (already converted): ${u.relativePath}")
+            ktTargets.add(kt)
+            continue
+        }
         log("${ts()} j2k    ${u.relativePath} -> ${kt.relativeToOrSelf(cfg.projectRoot())}")
         val r = convertJ2K(cfg, Path.of(u.sourcePath), kt)
         if (!r.ok) {
@@ -128,6 +150,19 @@ private fun attemptGroup(
     val tag = classifyFailure(g)
     log("${ts()} gradle FAILED ($tag, rc=${g.exitCode}, ${"%.1f".format(g.elapsedSeconds)}s)")
     val err = g.outputTail()
+
+    // Environmental failures (parent-project task policy, duplicate-class
+    // collisions from leftover .java, license headers, etc.) aren't anything
+    // the LLM can fix by re-refining. Surface them and let the outer retry
+    // budget / three-strikes path handle escalation. The user almost always
+    // needs to fix something in the target project, not the converted file.
+    if (tag == "build_env") {
+        log("${ts()} build-env failure — skipping refine#2 (not the LLM's bug)")
+        units.forEach {
+            state.mark(it.sourcePath, status = "failed", lastError = "[$tag] ${err.take(500)}")
+        }
+        return false
+    }
 
     // One auto-retry with the error inlined into the user prompt.
     for ((u, kt) in units.zip(ktTargets)) {
@@ -218,8 +253,14 @@ fun runConvert(
             group.forEach { state.mark(it.sourcePath, status = "committed") }
             report.converted += group.size
         } else {
-            log("${ts()} three strikes — reverting and marking manual-review")
-            revertLast(cfg)
+            // Three strikes. Don't call revertLast here — `commitFiles` only
+            // runs in the green branch above, so by definition no commit was
+            // made for this group. revertLast does `git reset --hard HEAD~1`,
+            // which would destroy a completely unrelated commit (potentially
+            // the user's own work) when our retry budget is exhausted.
+            // discardUnstaged is the right scope: it only touches the paths
+            // we know we modified.
+            log("${ts()} three strikes — marking manual-review (leaving .kt on disk for inspection)")
             val toRestore = group.map { Path.of(it.sourcePath) } + group.map { ktTargetFor(cfg, it) }
             discardUnstaged(cfg, toRestore)
             group.forEach { state.mark(it.sourcePath, status = "failed", addNote = "manual-review") }

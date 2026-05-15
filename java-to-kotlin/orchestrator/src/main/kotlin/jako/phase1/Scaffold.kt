@@ -26,7 +26,14 @@ data class ScaffoldResult(
     val movedTest: Int,
     val buildFile: Path,
     val agp9Invoked: Boolean,
+    /** Number of `.java` files set aside (as `<java>.scaffold-skip.bak`)
+     *  because a converted `.kt` already exists at the destination.
+     *  Counted across main + test. Defaulted to 0 so existing callers
+     *  that construct `ScaffoldResult(...)` positionally keep compiling. */
+    val skippedAlreadyConverted: Int = 0,
 )
+
+private data class MoveResult(val moved: Int, val skipped: Int)
 
 private fun moduleRoot(cfg: Config): Path {
     val root = cfg.projectRoot()
@@ -34,19 +41,51 @@ private fun moduleRoot(cfg: Config): Path {
         root.resolve(cfg.project.module) else root
 }
 
-private fun moveTree(src: Path, dst: Path): Int {
-    if (!src.exists()) return 0
-    if (src.toRealPath() == dst.toAbsolutePath().normalize()) return 0
+/**
+ * Move every `.java` under [src] into the parallel position under [dst].
+ *
+ * If a sibling `.kt` already exists at the post-conversion location
+ * (computed via [convertedKtFor]), the `.java` is **moved aside** to
+ * `<dst-path>.scaffold-skip.bak` instead of being deleted — that file
+ * was already converted by a previous Phase 2 run, but we keep the
+ * Java sibling as a recoverable artifact in case the `.kt` turns out
+ * to be stale or wrong. The orchestrator won't compile a `.bak` file,
+ * and Phase 2's J2K wrapper produces its own `<kt>.java.bak` for live
+ * conversions, so the two backup conventions don't clash.
+ *
+ * `convertedKtFor` may be `null` when the caller doesn't track converted
+ * files (e.g. moving tests in a phase where no `.kt` would exist yet).
+ */
+private fun moveTree(
+    src: Path,
+    dst: Path,
+    convertedKtFor: ((Path) -> Path)? = null,
+): MoveResult {
+    if (!src.exists()) return MoveResult(0, 0)
+    if (src.toRealPath() == dst.toAbsolutePath().normalize()) return MoveResult(0, 0)
     Files.createDirectories(dst)
-    var count = 0
+    var moved = 0
+    var skipped = 0
     Files.walk(src).use { stream ->
         val files = stream.filter { Files.isRegularFile(it) && it.toString().endsWith(".java") }.toList()
         for (path in files) {
             val rel = src.relativize(path)
             val target = dst.resolve(rel)
+            val alreadyConverted = convertedKtFor?.invoke(target)?.let {
+                Files.exists(it) && Files.size(it) > 0
+            } ?: false
+            if (alreadyConverted) {
+                // Move-aside rather than delete so the .java is recoverable
+                // if the existing .kt turns out to be stale or wrong.
+                val sideline = target.resolveSibling(target.fileName.toString() + ".scaffold-skip.bak")
+                Files.createDirectories(sideline.parent)
+                Files.move(path, sideline, StandardCopyOption.REPLACE_EXISTING)
+                skipped++
+                continue
+            }
             Files.createDirectories(target.parent)
             Files.move(path, target, StandardCopyOption.REPLACE_EXISTING)
-            count++
+            moved++
         }
     }
     // Sweep empty dirs.
@@ -55,7 +94,7 @@ private fun moveTree(src: Path, dst: Path): Int {
             .filter { Files.isDirectory(it) }
             .forEach { p -> if (Files.list(p).use { l -> !l.findFirst().isPresent }) Files.deleteIfExists(p) }
     }
-    return count
+    return MoveResult(moved, skipped)
 }
 
 /**
@@ -142,8 +181,23 @@ fun scaffold(cfg: Config, analysis: AnalysisResult): ScaffoldResult {
     val modRoot = moduleRoot(cfg)
 
     // 1. Move source trees into KMP layout.
-    val movedMain = moveTree(modRoot.resolve("src/main/java"), modRoot.resolve("src/jvmMain/java"))
-    val movedTest = moveTree(modRoot.resolve("src/test/java"), modRoot.resolve("src/jvmTest/java"))
+    // After a partial Phase 2 run, some `.java` files may already have a
+    // converted `.kt` sibling. Re-introducing them would either duplicate
+    // the class at jar-time or leave a stale `.java` in the source tree.
+    // Map each `.java` destination to its expected `.kt` and let moveTree
+    // delete-instead-of-move when that .kt already exists with content.
+    val mainKtRoot = modRoot.resolve("src/jvmMain/kotlin")
+    val mainJavaRoot = modRoot.resolve("src/jvmMain/java")
+    val testKtRoot = modRoot.resolve("src/jvmTest/kotlin")
+    val testJavaRoot = modRoot.resolve("src/jvmTest/java")
+    val mainKtFor = { javaTarget: Path ->
+        mainKtRoot.resolve(mainJavaRoot.relativize(javaTarget).toString().removeSuffix(".java") + ".kt")
+    }
+    val testKtFor = { javaTarget: Path ->
+        testKtRoot.resolve(testJavaRoot.relativize(javaTarget).toString().removeSuffix(".java") + ".kt")
+    }
+    val mainRes = moveTree(modRoot.resolve("src/main/java"), mainJavaRoot, mainKtFor)
+    val testRes = moveTree(modRoot.resolve("src/test/java"), testJavaRoot, testKtFor)
     Files.createDirectories(modRoot.resolve("src/jvmMain/kotlin"))
 
     // 2. Render KMP build file, backing up any existing one.
@@ -183,8 +237,9 @@ fun scaffold(cfg: Config, analysis: AnalysisResult): ScaffoldResult {
     }
 
     return ScaffoldResult(
-        movedMain = movedMain,
-        movedTest = movedTest,
+        movedMain = mainRes.moved,
+        movedTest = testRes.moved,
+        skippedAlreadyConverted = mainRes.skipped + testRes.skipped,
         buildFile = buildFile,
         agp9Invoked = agp9Invoked,
     )
@@ -193,6 +248,9 @@ fun scaffold(cfg: Config, analysis: AnalysisResult): ScaffoldResult {
 fun runScaffold(cfg: Config, analysis: AnalysisResult): ScaffoldResult {
     val res = scaffold(cfg, analysis)
     println("[scaffold] moved ${res.movedMain} main + ${res.movedTest} test files into KMP layout")
+    if (res.skippedAlreadyConverted > 0) {
+        println("[scaffold] set aside ${res.skippedAlreadyConverted} .java already converted to .kt (.scaffold-skip.bak)")
+    }
     println("[scaffold] wrote ${res.buildFile}")
     if (res.agp9Invoked) println("[scaffold] AGP9 migration skill applied")
     return res

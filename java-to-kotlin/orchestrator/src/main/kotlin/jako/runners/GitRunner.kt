@@ -2,7 +2,6 @@ package jako.runners
 
 import jako.Config
 import java.nio.file.Path
-import java.util.concurrent.TimeUnit
 
 /**
  * Commit-per-file git wrapper. Silently no-ops if the target project isn't a
@@ -12,11 +11,8 @@ data class GitResult(val ok: Boolean, val message: String)
 
 private fun runGit(cwd: Path, vararg args: String): Pair<Int, String> {
     val cmd = listOf("git", "-C", cwd.toString()) + args
-    val pb = ProcessBuilder(cmd).redirectErrorStream(true)
-    val proc = pb.start()
-    val out = proc.inputStream.bufferedReader().readText()
-    proc.waitFor(60, TimeUnit.SECONDS)
-    return proc.exitValue() to out
+    val pr = runProcess(cmd = cmd, cwd = cwd, timeoutSeconds = 60, mergeStderr = true)
+    return pr.exitCode to pr.stdout
 }
 
 private fun isRepo(root: Path): Boolean {

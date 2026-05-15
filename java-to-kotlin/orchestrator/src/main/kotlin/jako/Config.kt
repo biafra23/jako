@@ -88,7 +88,7 @@ data class SkillsCfg(
 @Serializable
 data class GradleCfg(
     val wrapper: String = "./gradlew",
-    @SerialName("test_command") val testCommand: String = ":{module}:compileKotlinJvm :{module}:test",
+    @SerialName("test_command") val testCommand: String = ":{module}:compileKotlin :{module}:test",
     @SerialName("timeout_seconds") val timeoutSeconds: Long = 1800,
 )
 

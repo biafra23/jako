@@ -8,9 +8,10 @@ import java.util.concurrent.TimeUnit
 /**
  * Gradle compile + test gate — phase 2.3.
  *
- * The orchestrator only cares: did `./gradlew :module:compileKotlinJvm
- * :module:test` exit 0? Failure classification is shallow — we look for a
- * handful of patterns to route between deterministic fixes and LLM retries.
+ * The orchestrator only cares: did `./gradlew :module:compileKotlin
+ * :module:test` exit 0 (configurable via `gradle.test_command`)? Failure
+ * classification is shallow — we look for a handful of patterns to route
+ * between deterministic fixes and LLM retries.
  */
 data class GradleResult(
     val ok: Boolean,

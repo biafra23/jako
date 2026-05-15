@@ -10,7 +10,7 @@ Full design: [`plan-2-thin-orchestrator.md`](plan-2-thin-orchestrator.md).
 
 Every Java file walks the same ordered chain. First eligible backend wins; on error the chain advances.
 
-1. **J2K** — JetBrains' headless converter. Mechanical AST translation, no LLM. Falls through to passthrough if not wired up.
+1. **J2K — deferred.** JetBrains' headless converter is the intended first step but is not yet implemented. The orchestrator currently runs in `passthrough` mode (the `.kt` slot starts as a verbatim copy of the `.java` text) so the LLM step does the entire conversion. Wiring up headless J2K via a custom IntelliJ `ApplicationStarter` plugin is on the roadmap; see [`plan-2-thin-orchestrator.md`](plan-2-thin-orchestrator.md) §2.1.
 2. **Local LLM** — OpenAI-compatible endpoint (LM Studio / Ollama / vLLM). LOW-risk files only, reachability-probed once per run.
 3. **Claude `-p`** — Haiku / Sonnet / Opus selected by risk tier, with the JetBrains `kotlin-tooling-java-to-kotlin` skill as system prompt.
 4. **DeepSeek v4** — fallback when Claude's 5-hour subscription window is exhausted and `DEEPSEEK_API_KEY` is set.
@@ -61,4 +61,4 @@ cd jako/java-to-kotlin
 
 ## Why not just IntelliJ's "Convert to Kotlin"?
 
-J2K alone produces non-idiomatic Kotlin and doesn't manage cross-file ordering, the test gate, KMP scaffolding, dependency mapping, or commit-per-file safety. This orchestrator wraps J2K (when available) and adds the rest.
+J2K alone produces non-idiomatic Kotlin and doesn't manage cross-file ordering, the test gate, KMP scaffolding, dependency mapping, or commit-per-file safety. This orchestrator is designed to wrap J2K (once headless invocation is implemented) and adds the rest; until then the LLM step does the whole conversion from raw Java.

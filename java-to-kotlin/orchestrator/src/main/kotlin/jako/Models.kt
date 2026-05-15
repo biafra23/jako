@@ -27,12 +27,22 @@ data class JavaSourceUnit(
 )
 
 @Serializable
+data class GradleDep(
+    /** Original Gradle configuration the dep was declared in: api,
+     *  implementation, compileOnly, runtimeOnly, testImplementation,
+     *  testCompileOnly, testRuntimeOnly, annotationProcessor, or the
+     *  legacy `compile`. */
+    val configuration: String,
+    val coordinate: String,
+)
+
+@Serializable
 data class BuildModel(
     val projectRoot: String,
     val module: String,
     val javaMainRoot: String,
     val javaTestRoot: String? = null,
-    val gradleDependencies: List<String> = emptyList(),
+    val gradleDependencies: List<GradleDep> = emptyList(),
     val pluginUsesAgp: Boolean = false,
 )
 

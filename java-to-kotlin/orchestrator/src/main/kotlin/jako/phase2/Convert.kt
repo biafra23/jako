@@ -22,7 +22,7 @@ import java.time.format.DateTimeFormatter
  * For each batch in convert-order.json:
  *   1. J2K mechanical pass on every file in the batch.
  *   2. Refinement via the backend chain (phase2.Refine).
- *   3. ./gradlew :module:compileKotlinJvm :module:test.
+ *   3. ./gradlew :module:compileKotlin :module:test (via gradle.test_command).
  *   4. On green: git commit; on red: classify, retry with error context.
  *   5. Three strikes: revert + mark `failed` + move on.
  *

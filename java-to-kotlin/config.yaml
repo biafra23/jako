@@ -50,7 +50,7 @@ skills:
 gradle:
   wrapper: ./gradlew
   # {module} is templated in at run-time from project.module.
-  test_command: ":{module}:compileKotlinJvm :{module}:test"
+  test_command: ":{module}:compileKotlin :{module}:test"
   timeout_seconds: 1800
 
 analysis:

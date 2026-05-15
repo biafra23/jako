@@ -4,6 +4,9 @@ build/
 out/
 **/*.class
 **/*.jar
+# Gradle's wrapper JAR is required for `./gradlew` to bootstrap — must
+# be tracked even though it matches the *.jar pattern above.
+!**/gradle/wrapper/gradle-wrapper.jar
 
 # IDE / editor
 .idea/

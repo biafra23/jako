@@ -8,6 +8,7 @@ import jako.runners.invokeSkill
 import jako.runners.parseWindowResetSeconds
 import jako.runners.probeLocalLlm
 import java.nio.file.Path
+import java.util.concurrent.atomic.AtomicLong
 
 /**
  * Per-file backend chain policy — implements plan §"Per-file backend chain".
@@ -22,22 +23,28 @@ import java.nio.file.Path
  */
 
 class RefineState(cfg: Config) {
-    /** epoch millis; 0 means the claude window is open as far as we know */
-    private var claudePausedUntil: Long = 0L
+    /**
+     * epoch millis; 0 means the claude window is open as far as we know.
+     * Atomic so it's safe to read/write from parallel `refine(...)` calls
+     * fanned out by the convert loop. `updateAndGet` is the right primitive
+     * for the read-compare-write inside `markClaudePaused`.
+     */
+    private val claudePausedUntil = AtomicLong(0L)
 
     /** Set once at phase-2 start; only matters when local_model is enabled. */
     val localReachable: Boolean = if (cfg.localModel.enabled) probeLocalLlm(cfg) else false
 
-    fun claudeAvailable(): Boolean = System.currentTimeMillis() >= claudePausedUntil
+    fun claudeAvailable(): Boolean = System.currentTimeMillis() >= claudePausedUntil.get()
 
     fun markClaudePaused(secondsFromNow: Long?) {
         val delta = secondsFromNow ?: 3600L
         val target = System.currentTimeMillis() + delta * 1000
-        if (target > claudePausedUntil) claudePausedUntil = target
+        claudePausedUntil.updateAndGet { current -> maxOf(current, target) }
     }
 
     fun resumeClaudeIfWindowExpired() {
-        if (System.currentTimeMillis() >= claudePausedUntil) claudePausedUntil = 0L
+        val now = System.currentTimeMillis()
+        claudePausedUntil.updateAndGet { current -> if (now >= current) 0L else current }
     }
 }
 

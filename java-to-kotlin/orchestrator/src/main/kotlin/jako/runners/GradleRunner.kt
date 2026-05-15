@@ -106,3 +106,62 @@ fun classifyFailure(result: GradleResult): String {
         else -> "unknown"
     }
 }
+
+/**
+ * Extract Kotlin compiler errors grouped by the source file they reference.
+ *
+ * The kotlin plugin's output format is `e: file:///abs/path/Foo.kt:LINE:COL <message>`
+ * (one issue per line; multi-line messages indent continuation lines).
+ * We pick up the absolute file path and collect every line in that diagnostic
+ * (until the next `e: ` / `w: ` boundary) keyed by that path.
+ *
+ * Returns a Map<Path, List<String>> of file → trimmed diagnostic blocks. The
+ * keys are absolute paths exactly as the compiler emitted them, so callers
+ * comparing against `unit.sourcePath` / `ktTargetFor(...)` should normalise.
+ *
+ * Empty result means either:
+ * - the failure didn't surface any file-level kotlin diagnostics
+ *   (e.g. it was a `build_env` failure, a test failure, a gradle task error),
+ * - or the output shape doesn't match (a future kotlin plugin version).
+ * In both cases the caller should fall back to whole-batch behaviour.
+ */
+fun parsePerFileKotlinErrors(result: GradleResult): Map<Path, List<String>> {
+    val blob = result.stdoutTail + "\n" + result.stderrTail
+    // Strict prefix match: `e: file:///…/Name.kt:line:col …`. Restrict to .kt
+    // since refine#2's job is fixing Kotlin, not Java compiles.
+    val errStart = Regex("""^e: file://([^:]+\.kt):(\d+):(\d+) (.*)$""")
+    // A new diagnostic / a gradle-output frame ends the current diagnostic.
+    // Anything else non-blank is treated as continuation of the current
+    // diagnostic — the Kotlin compiler doesn't always indent continuation
+    // lines (e.g. overload-resolution-ambiguity lists the candidate
+    // signatures unindented).
+    val boundary = Regex("""^(e: |w: |FAILURE:|BUILD FAILED|BUILD SUCCESSFUL|\* |> Task |> What went wrong)""")
+    val grouped = mutableMapOf<Path, MutableList<String>>()
+    var current: Path? = null
+    var buffer: StringBuilder? = null
+    fun flush() {
+        val p = current
+        val b = buffer
+        if (p != null && b != null && b.isNotEmpty()) {
+            grouped.getOrPut(p) { mutableListOf() }.add(b.toString().trim())
+        }
+        current = null
+        buffer = null
+    }
+    for (line in blob.lineSequence()) {
+        val m = errStart.find(line)
+        when {
+            m != null -> {
+                flush()
+                current = Path.of(m.groupValues[1])
+                buffer = StringBuilder(line).append('\n')
+            }
+            current != null && line.isBlank() -> flush()
+            current != null && boundary.containsMatchIn(line) -> flush()
+            current != null -> buffer?.append(line)?.append('\n')
+            else -> Unit
+        }
+    }
+    flush()
+    return grouped
+}

@@ -72,14 +72,35 @@ fun compileAndTest(cfg: Config): GradleResult {
 /**
  * Tag a gradle failure so phase 2 can pick a remedy.
  *
+ *   build_env       — environmental / build-script issue outside the LLM's
+ *                     domain (parent project policy task throws at config
+ *                     time, duplicate-class collision from a leftover .java,
+ *                     NOTICE/license guards, missing wrapper, etc.). Refine
+ *                     can't fix these; retrying is just burning cost.
  *   missing_import  — "unresolved reference"; often fixed by adding an import.
  *   syntax          — Kotlin parser choked on the file (refinement bug).
  *   jvm_interop     — Java test can't see the new Kotlin symbol (need @JvmStatic).
  *   test_failure    — compile passed, test asserted false.
  *   unknown         — everything else; retry refinement with the error inlined.
+ *
+ * Order matters: `build_env` is checked first because its signatures (e.g.
+ * "A problem occurred evaluating root project") would otherwise fall through
+ * to `unknown` and trigger a pointless refine retry.
  */
 fun classifyFailure(result: GradleResult): String {
     val blob = (result.stdoutTail + "\n" + result.stderrTail).lowercase()
+    val buildEnvSignals = listOf(
+        "a problem occurred evaluating",         // config-time eval failures
+        "a problem occurred configuring",
+        "could not create task",                 // task registration threw
+        "is a duplicate but no duplicate handling", // duplicate jar entry
+        "plugin .* not found",
+        "could not resolve all dependencies",    // network / repo issue
+        "no notice file",                        // Tuweni :checkNotice flavor
+        "notice file is not up-to-date",
+        "license header",                        // spotless license-header guard
+    )
+    if (buildEnvSignals.any { it.toRegex().containsMatchIn(blob) }) return "build_env"
     return when {
         "unresolved reference" in blob -> "missing_import"
         "expecting an expression" in blob || "syntax error" in blob -> "syntax"

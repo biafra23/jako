@@ -264,16 +264,37 @@ private fun tarjanScc(nodes: List<String>, adj: Map<String, Set<String>>): List<
     return result
 }
 
+/**
+ * Topo-sort the SCC condensation in **conversion order**: each batch
+ * appears after every batch it depends on.
+ *
+ * Built by inverting the natural dependency edges. `adj[u]` is "u depends
+ * on v", so the raw DAG has edges `depender → dep`. Kahn's algorithm
+ * starting from `indeg==0` would yield ROOTS of that DAG — the top-level
+ * types nothing depends on — first, which is exactly backwards for
+ * build/conversion order. We want LEAVES (nothing further to wait for)
+ * first.
+ *
+ * Solution: build `condAdj` in the inverted direction (`dep → depender`)
+ * so that "indeg of x" means "number of x's own dependencies." Then
+ * `indeg==0` are the SCCs with no outgoing deps — the leaves we want
+ * first.
+ */
 private fun topoSort(sccs: List<List<String>>, adj: Map<String, Set<String>>): List<List<String>> {
     val nodeToScc = mutableMapOf<String, Int>()
     for ((i, comp) in sccs.withIndex()) for (n in comp) nodeToScc[n] = i
 
+    // `condAdj[b]` = SCCs that depend on b. When we process b, we
+    // decrement those dependers' indeg, freeing them up.
+    // `indeg[a]` = number of inter-SCC dependencies a still has waiting.
     val condAdj = (0 until sccs.size).associateWith { mutableSetOf<Int>() }
     val indeg = (0 until sccs.size).associateWith { 0 }.toMutableMap()
     for ((u, outs) in adj) for (v in outs) {
         val a = nodeToScc[u]!!; val b = nodeToScc[v]!!
-        if (a != b && b !in condAdj[a]!!) {
-            condAdj[a]!!.add(b); indeg[b] = indeg[b]!! + 1
+        // u depends on v ⇒ a depends on b. Record the inverse edge
+        // (b → a) for Kahn so we can release a once b is done.
+        if (a != b && a !in condAdj[b]!!) {
+            condAdj[b]!!.add(a); indeg[a] = indeg[a]!! + 1
         }
     }
     val ready = ArrayDeque(

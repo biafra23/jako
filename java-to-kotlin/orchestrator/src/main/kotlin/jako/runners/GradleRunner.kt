@@ -129,7 +129,11 @@ fun parsePerFileKotlinErrors(result: GradleResult): Map<Path, List<String>> {
     val blob = result.stdoutTail + "\n" + result.stderrTail
     // Strict prefix match: `e: file:///…/Name.kt:line:col …`. Restrict to .kt
     // since refine#2's job is fixing Kotlin, not Java compiles.
-    val errStart = Regex("""^e: file://([^:]+\.kt):(\d+):(\d+) (.*)$""")
+    //
+    // Non-greedy `.+?` so that Windows paths like `/C:/…/Foo.kt` capture
+    // through the drive-letter colon. `[^:]+` would stop at `C:` and the
+    // diagnostic would be silently dropped.
+    val errStart = Regex("""^e: file://(.+?\.kt):(\d+):(\d+) (.*)$""")
     // A new diagnostic / a gradle-output frame ends the current diagnostic.
     // Anything else non-blank is treated as continuation of the current
     // diagnostic — the Kotlin compiler doesn't always indent continuation
@@ -153,7 +157,14 @@ fun parsePerFileKotlinErrors(result: GradleResult): Map<Path, List<String>> {
         when {
             m != null -> {
                 flush()
-                current = Path.of(m.groupValues[1])
+                // Round-trip through `file:` URI so Windows drive letters
+                // resolve correctly. On Linux `/abs/path` round-trips fine;
+                // on Windows the captured `/C:/path` becomes a proper
+                // C-drive absolute path instead of a current-drive-relative
+                // one (`Path.of("/C:/x")` is wrong; the URI form is right).
+                current = runCatching {
+                    Path.of(java.net.URI.create("file://" + m.groupValues[1]))
+                }.getOrNull() ?: continue
                 buffer = StringBuilder(line).append('\n')
             }
             current != null && line.isBlank() -> flush()

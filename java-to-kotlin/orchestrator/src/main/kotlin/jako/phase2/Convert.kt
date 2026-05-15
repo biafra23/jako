@@ -73,6 +73,21 @@ private data class RefineOutcome(
 )
 
 /**
+ * Mirror of the chain-step ordering inside `refine(...)`, used only to
+ * label the model in a failure outcome when an exception bubbled out
+ * before any backend ran. Keeps RunState honest about *intent* rather
+ * than tagging the unit with the sentinel "?" model.
+ */
+private fun intendedModelFor(cfg: Config, refineState: RefineState, risk: String): String =
+    when {
+        risk == "LOW" && cfg.localModel.enabled && refineState.localReachable ->
+            "local:${cfg.localModel.model}"
+        !refineState.claudeAvailable() && cfg.fallback.enabled ->
+            "deepseek:${cfg.fallback.deepseek.model}"
+        else -> cfg.claude.models[risk] ?: cfg.claude.defaultModel
+    }
+
+/**
  * Fan out one refine call per item with bounded concurrency. Logs are
  * `println` underneath (thread-safe). Catches exceptions and surfaces them
  * as `ok=false` outcomes so a single backend hiccup doesn't poison the
@@ -99,7 +114,12 @@ private fun parallelRefine(
                                     RefineOutcome(u, kt, ok, model, tail)
                                 },
                                 onFailure = { e ->
-                                    RefineOutcome(u, kt, false, model = "?", tail = "exception: ${e.message ?: e.javaClass.simpleName}")
+                                    // Compute the model we would have picked
+                                    // had the call reached a backend, so RunState
+                                    // shows an accurate intended-model name
+                                    // rather than the misleading "?" sentinel.
+                                    val intendedModel = intendedModelFor(cfg, refineState, u.risk)
+                                    RefineOutcome(u, kt, false, intendedModel, "exception: ${e.message ?: e.javaClass.simpleName}")
                                 },
                             )
                     }
@@ -233,24 +253,38 @@ private fun attemptGroup(
     // find which .kt files the compiler complained about, then refine#2
     // only those, passing each unit its own file-specific error tail
     // instead of the whole batch's. Falls back to re-refining everything
-    // if parsing returned nothing (e.g. a test-failure or unknown format).
+    // when (a) the parser found nothing — test failure, unknown plugin
+    // output — OR (b) the parser found files but none match our batch
+    // (errors in generated sources, downstream modules, or a cousin
+    // package). Both cases would otherwise hand `parallelRefine` an empty
+    // list and burn the retry without invoking the LLM.
     val perFileErrors: Map<Path, List<String>> = jako.runners.parsePerFileKotlinErrors(g)
     val erroringKts: Set<Path> = perFileErrors.keys.map { it.toAbsolutePath().normalize() }.toSet()
-    val refine2Items: List<Triple<JavaSourceUnit, Path, String>> = if (erroringKts.isEmpty()) {
-        log("${ts()} refine#2: no per-file errors parsed — re-refining all ${units.size} units with batch error tail")
-        units.zip(ktTargets).map { (u, kt) -> Triple(u, kt, "[$tag] gradle output tail:\n$err") }
-    } else {
-        val matched = units.zip(ktTargets).mapNotNull { (u, kt) ->
-            val ktAbs = kt.toAbsolutePath().normalize()
-            if (ktAbs !in erroringKts) return@mapNotNull null
-            val diagBlock = perFileErrors[ktAbs]?.joinToString("\n\n") ?: ""
-            Triple(u, kt, "[$tag] kotlin diagnostics for this file:\n$diagBlock")
+    val matched: List<Triple<JavaSourceUnit, Path, String>> = units.zip(ktTargets).mapNotNull { (u, kt) ->
+        val ktAbs = kt.toAbsolutePath().normalize()
+        if (ktAbs !in erroringKts) return@mapNotNull null
+        val diagBlock = perFileErrors[ktAbs]?.joinToString("\n\n") ?: ""
+        Triple(u, kt, "[$tag] kotlin diagnostics for this file:\n$diagBlock")
+    }
+    val refine2Items: List<Triple<JavaSourceUnit, Path, String>> = when {
+        erroringKts.isEmpty() -> {
+            log("${ts()} refine#2: no per-file errors parsed — re-refining all ${units.size} units with batch error tail")
+            units.zip(ktTargets).map { (u, kt) -> Triple(u, kt, "[$tag] gradle output tail:\n$err") }
         }
-        log(
-            "${ts()} refine#2: ${matched.size}/${units.size} units have compiler diagnostics " +
-                "(others compiled OK — skipping them this pass)",
-        )
-        matched
+        matched.isEmpty() -> {
+            log(
+                "${ts()} refine#2: parser found ${erroringKts.size} erroring file(s) but none in this batch " +
+                    "(likely generated sources or a downstream module); re-refining all ${units.size} with batch tail",
+            )
+            units.zip(ktTargets).map { (u, kt) -> Triple(u, kt, "[$tag] gradle output tail:\n$err") }
+        }
+        else -> {
+            log(
+                "${ts()} refine#2: ${matched.size}/${units.size} units have compiler diagnostics " +
+                    "(others compiled OK — skipping them this pass)",
+            )
+            matched
+        }
     }
     val refine2Outcomes = parallelRefine(cfg, refineState, refine2Items, log)
     for (o in refine2Outcomes) {

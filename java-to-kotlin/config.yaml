@@ -1,5 +1,6 @@
 # Plan 2 — thin orchestrator config.
 # Paths are resolved relative to this file unless absolute. `~` is expanded.
+# YAML uses snake_case; Kotlin maps it to camelCase via @SerialName.
 
 project:
   # Root of the Gradle/Maven project to convert.
@@ -24,17 +25,17 @@ claude:
   pause_on_rate_limit: true
 
 j2k:
-  # Mechanical first-pass strategy. The orchestrator never inspects what J2K
-  # produces — it just feeds the .kt file forward to the refinement step.
-  #   headless_idea: pass --command to `idea.sh` for headless conversion (Option A)
-  #                  requires a custom IntelliJ plugin that registers an
-  #                  ApplicationStarter; vanilla idea has no built-in J2K command.
-  #   vscode_engine: shell out to a Node wrapper around j2k-vscode (Option B)
-  #                  j2k-vscode is currently editor-only; needs a fork to expose a CLI.
-  #   external:      `command` is a fully-formed script that takes <java_in> <kt_out>
-  #                  scripts/passthrough-j2k.sh is a 3-line no-op shim that lets
-  #                  the claude-skill refinement step do the whole conversion.
-  strategy: external
+  # Per-file backend chain step 1. See plan §Phase 2.
+  #   passthrough:    copy .java verbatim into the .kt slot; the LLM step does
+  #                   the whole conversion. The fallback when no J2K binary
+  #                   is wired up. The orchestrator treats this as "J2K not
+  #                   available" for chain-routing purposes.
+  #   headless_idea:  drive idea.sh in headless mode via a custom IntelliJ
+  #                   ApplicationStarter plugin we ship. Requires building
+  #                   that plugin separately.
+  #   external:       `command` is a fully-formed script that takes
+  #                   <java_in> <kt_out> and writes the converted Kotlin.
+  strategy: passthrough
   command: scripts/passthrough-j2k.sh
   args: []
   timeout_seconds: 1800
@@ -53,8 +54,7 @@ gradle:
   timeout_seconds: 1800
 
 analysis:
-  # javalang = proper AST; regex = no extra dep, less accurate.
-  parser: javalang
+  parser: javaparser     # only javaparser is supported in the Kotlin orchestrator
   separate_tests: true
   # Files importing any of these are risk-bumped.
   reflection_imports:
@@ -70,9 +70,24 @@ git:
   commit_per_file: true
   author: ""
 
-# When claude -p hits the 5-hour subscription window, fall through to a
-# different API for the rest of that window. The orchestrator remembers when
-# the window resets and resumes claude automatically.
+# Per-file backend chain step 2: local OpenAI-compatible endpoint
+# (LM Studio / Ollama / vLLM / llama.cpp server). Used ONLY for LOW-risk
+# files when enabled and the reachability probe at phase-2 start passes.
+local_model:
+  enabled: false
+  base_url: http://localhost:1234/v1
+  model: google/gemma-4-31b
+  # Leave empty for typical local servers; set to env-var name (e.g.
+  # "OPENAI_API_KEY") if your server requires a bearer token.
+  api_key_env: ""
+  temperature: 0.1
+  max_tokens: 16384
+  timeout_seconds: 1800
+  probe_timeout_seconds: 3
+
+# Per-file backend chain steps 4 & 5: when claude -p hits its 5-hour window,
+# the orchestrator falls through to DeepSeek (if enabled and credits) or
+# parks until the window resets.
 fallback:
   enabled: false              # flip to true once DEEPSEEK_API_KEY is exported
   return_to_claude_after_window: true

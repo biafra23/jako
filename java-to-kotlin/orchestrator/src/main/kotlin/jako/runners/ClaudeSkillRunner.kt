@@ -181,7 +181,16 @@ fun invokeSkill(
     }
 
     val payload = runCatching { Json.parseToJsonElement(pr.stdout) }.getOrNull()
-    val ok = pr.exitCode == 0 && Files.exists(ktFile) && Files.size(ktFile) > 0 && !rateLimited
+    val ktWritten = Files.exists(ktFile) && Files.size(ktFile) > 0
+    // claude -p exits non-zero on `error_max_turns` (the turn budget ran
+    // out mid-conversation) but the model has often already produced the
+    // .kt before then — it just kept burning turns on follow-up tool calls
+    // (read-back verification, an extraneous gradle invocation, etc.).
+    // Accept that outcome iff the .kt was actually written; the gradle
+    // gate downstream is the real verdict on whether the file is good.
+    // Substring match on the small single-object JSON stdout is enough.
+    val exhaustedTurnsWithFile = ktWritten && "error_max_turns" in pr.stdout
+    val ok = (pr.exitCode == 0 || exhaustedTurnsWithFile) && ktWritten && !rateLimited
 
     return SkillResult(
         ok = ok,

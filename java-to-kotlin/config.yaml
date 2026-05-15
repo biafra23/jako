@@ -19,10 +19,13 @@ claude:
     LOW: claude-haiku-4-5-20251001
     MEDIUM: claude-sonnet-4-6
     HIGH: claude-opus-4-7
-  # Read .java + Read .kt + Edit/Write .kt + (optional) Read-back verify
-  # is already 3-4 turns on any non-trivial file. 10 gives headroom for the
-  # skill to chain a couple of edits without false `error_max_turns`.
-  max_turns: 10
+  # On a single leaf file Read .java + Read .kt + Edit .kt is ~3 turns.
+  # Inside an SCC the model also reads sibling files in the cycle to
+  # understand cross-file types, which can take 8-12 turns alone. 20
+  # gives headroom for that plus a few self-verification reads without
+  # tripping `error_max_turns`. M3 (6-file Bytes48 cycle) showed 10 was
+  # too tight — half the files in the cycle never reached refinement.
+  max_turns: 20
   permission_mode: acceptEdits
   extra_args: []
   pause_on_rate_limit: true

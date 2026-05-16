@@ -39,6 +39,23 @@ data class Choice(val index: Int = 0, val message: ChatMessage? = null)
 
 internal val httpJson = Json { ignoreUnknownKeys = true; encodeDefaults = false }
 
+/**
+ * Pin HTTP/1.1 for everything this client does.
+ *
+ * Java's `HttpClient` defaults to HTTP/2, which over plain `http://` (no
+ * TLS, no ALPN) means sending an HTTP/2 prior-knowledge preface. LM Studio,
+ * Ollama, vLLM, and llama.cpp's bundled server all speak HTTP/1.1 only on
+ * their plain-HTTP listeners — the preface hangs unanswered until the
+ * request times out. Observed cleanly against LM Studio: HTTP/2 times out
+ * in 3 s, HTTP/1.1 returns 200 in ~35 ms. (curl works because curl picks
+ * 1.1 by default.)
+ *
+ * DeepSeek's HTTPS endpoint also speaks HTTP/1.1 fine; the one-shot
+ * completion path doesn't benefit from HTTP/2 multiplexing here. Pinning
+ * 1.1 everywhere keeps both code paths boringly identical.
+ */
+private val HTTP1: HttpClient.Version = HttpClient.Version.HTTP_1_1
+
 /** Returns (httpStatus, body). Throws only on network-level errors. */
 fun postChat(
     baseUrl: String,
@@ -51,6 +68,7 @@ fun postChat(
 ): Pair<Int, String> {
     val req = HttpRequest.newBuilder()
         .uri(URI.create(baseUrl.trimEnd('/') + "/chat/completions"))
+        .version(HTTP1)
         .timeout(Duration.ofSeconds(timeoutSeconds))
         .header("Content-Type", "application/json")
         .apply { if (!apiKey.isNullOrBlank()) header("Authorization", "Bearer $apiKey") }
@@ -68,6 +86,7 @@ fun postChat(
         )
         .build()
     val client = HttpClient.newBuilder()
+        .version(HTTP1)
         .connectTimeout(Duration.ofSeconds(10))
         .build()
     val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
@@ -85,12 +104,14 @@ fun probeEndpoint(baseUrl: String, apiKey: String?, timeoutSeconds: Long): Boole
         baseUrl.trimEnd('/').removeSuffix("/v1") + "/v1/models",
     ).distinct()
     val client = HttpClient.newBuilder()
+        .version(HTTP1)
         .connectTimeout(Duration.ofSeconds(timeoutSeconds))
         .build()
     for (u in urls) {
         runCatching {
             val req = HttpRequest.newBuilder()
                 .uri(URI.create(u))
+                .version(HTTP1)
                 .timeout(Duration.ofSeconds(timeoutSeconds))
                 .apply { if (!apiKey.isNullOrBlank()) header("Authorization", "Bearer $apiKey") }
                 .GET()

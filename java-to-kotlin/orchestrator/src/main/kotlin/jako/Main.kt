@@ -75,8 +75,13 @@ fun main(rawArgs: Array<String>) {
             writeReports(cfg, analysis, state, wallMillis = System.currentTimeMillis() - t0)
         }
         "all" -> {
-            val analysis = runAnalyze(cfg)
-            runScaffold(cfg, analysis)
+            val initial = runAnalyze(cfg)
+            runScaffold(cfg, initial)
+            // Scaffold physically moves .java files into KMP layout but
+            // doesn't update the in-memory analysis paths. Rebind so
+            // runConvert (and any subsequent --phase convert resume)
+            // hands J2K paths that actually exist on disk.
+            val analysis = jako.phase1.rebindAnalysisToKmpLayout(cfg, initial)
             val state = loadState(cfg, force = args.force)
             runConvert(cfg, analysis, state, only = args.only)
             writeReports(cfg, analysis, state, wallMillis = System.currentTimeMillis() - t0)

@@ -255,3 +255,46 @@ fun runScaffold(cfg: Config, analysis: AnalysisResult): ScaffoldResult {
     if (res.agp9Invoked) println("[scaffold] AGP9 migration skill applied")
     return res
 }
+
+/**
+ * Returns a copy of [analysis] with every `unit.sourcePath` and every
+ * `order[*]` entry rewritten from the Maven layout (`src/main/java/...`
+ * / `src/test/java/...`) to the KMP layout the scaffold phase just laid
+ * down on disk (`src/jvmMain/java/...` / `src/jvmTest/java/...`).
+ *
+ * Why this matters: `runAnalyze` records each unit's `sourcePath` against
+ * the *pre*-scaffold filesystem. `runScaffold` then physically moves the
+ * .java files but doesn't rewrite the in-memory analysis. Without this
+ * rebinding, `runConvert` hands J2K paths that no longer exist on disk
+ * (every "missing input" failure in M3-style first runs traced back to
+ * this). `relativePath` is package-relative (e.g.
+ * `org/apache/tuweni/bytes/Foo.java`) and therefore layout-independent —
+ * left alone.
+ *
+ * Also re-persists `source-inventory.json` / `convert-order.json` /
+ * `risk-classification.json` so a subsequent `--phase convert` run loads
+ * the post-scaffold paths.
+ */
+fun rebindAnalysisToKmpLayout(cfg: Config, analysis: AnalysisResult): AnalysisResult {
+    val modRoot = moduleRoot(cfg)
+    val mainOld = modRoot.resolve("src/main/java").toString()
+    val mainNew = modRoot.resolve("src/jvmMain/java").toString()
+    val testOld = modRoot.resolve("src/test/java").toString()
+    val testNew = modRoot.resolve("src/jvmTest/java").toString()
+
+    fun rebind(path: String): String = when {
+        path.startsWith("$mainOld/") -> mainNew + path.substring(mainOld.length)
+        path.startsWith("$testOld/") -> testNew + path.substring(testOld.length)
+        else -> path
+    }
+
+    val newUnits = analysis.units.map { u ->
+        val rebound = rebind(u.sourcePath)
+        if (rebound == u.sourcePath) u else u.copy(sourcePath = rebound)
+    }
+    val newOrder = analysis.order.map { batch -> batch.map(::rebind) }
+    val newCycles = newOrder.filter { it.size > 1 }
+    val updated = analysis.copy(units = newUnits, order = newOrder, cycles = newCycles)
+    updated.write(cfg.stateDir())
+    return updated
+}

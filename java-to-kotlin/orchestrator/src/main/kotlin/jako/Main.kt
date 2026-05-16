@@ -75,12 +75,22 @@ internal data class Args(
  * pure replacement — passing `--project ~/foo` swaps `project.root`
  * outright. Empty string is treated as "not provided" so callers can
  * pass `--project ""` defensively without clobbering the config.
+ *
+ * **Preserves `Config.base`.** Kotlin's auto-generated `data class
+ * copy(...)` only copies primary-constructor properties; the class-body
+ * `var base: Path` (where `loadConfig` recorded the config file's
+ * directory for relative-path resolution) gets reset to `Path.of(".")`.
+ * Without re-applying `base`, every relative path in config.yaml
+ * (skills root, scripts/, vendored-skills/, etc.) silently starts
+ * resolving against the JVM's CWD the moment a `--project` /
+ * `--module` flag is passed.
  */
 internal fun Config.withOverrides(args: Args): Config {
     val newRoot = args.project?.takeIf { it.isNotBlank() } ?: this.project.root
     val newModule = args.module?.takeIf { it.isNotBlank() } ?: this.project.module
     if (newRoot == this.project.root && newModule == this.project.module) return this
     return this.copy(project = this.project.copy(root = newRoot, module = newModule))
+        .apply { base = this@withOverrides.base }
 }
 
 private fun parseArgs(rawArgs: Array<String>): Args {

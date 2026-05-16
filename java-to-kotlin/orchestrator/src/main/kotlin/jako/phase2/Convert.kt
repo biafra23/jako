@@ -124,8 +124,12 @@ private fun parallelRefine(
                                 log("${ts()}   ↳ ${kt.relativeToOrSelf(cfg.projectRoot())} — refining for ${elapsed}s")
                             }
                         }
+                        val ktRel = kt.relativeToOrSelf(cfg.projectRoot())
+                        val onBackend: (String) -> Unit = { backend ->
+                            log("${ts()}   ↳ $ktRel → $backend")
+                        }
                         try {
-                            runCatching { refineOne(cfg, refineState, u, kt, extra) }
+                            runCatching { refineOne(cfg, refineState, u, kt, extra, onBackend) }
                                 .fold(
                                     onSuccess = { (ok, model, tail) ->
                                         RefineOutcome(u, kt, ok, model, tail)
@@ -157,6 +161,7 @@ private fun refineOne(
     unit: JavaSourceUnit,
     ktFile: Path,
     extra: String = "",
+    onBackendAttempt: (String) -> Unit = {},
 ): Triple<Boolean, String, String> {
     val res = refine(
         cfg = cfg,
@@ -167,6 +172,7 @@ private fun refineOne(
         cwd = cfg.projectRoot(),
         isTest = unit.isTest,
         extraUserPrompt = extra,
+        onBackendAttempt = onBackendAttempt,
     )
     val tail = if (res.stderrTail.isNotBlank()) res.stderrTail else res.stdoutTail
     return Triple(res.ok, res.model, tail)

@@ -57,11 +57,21 @@ fun refine(
     cwd: Path,
     isTest: Boolean = false,
     extraUserPrompt: String = "",
+    /**
+     * Called with a one-line message each time we ATTEMPT a backend
+     * (local LLM / Claude / DeepSeek). Lets the caller surface
+     * "currently in flight on X" in the convert log — without it,
+     * the user sees only a "refine X.kt starts" line and no clue
+     * which chain step is running. Default is a no-op so tests /
+     * non-orchestrator callers don't need to opt in.
+     */
+    onBackendAttempt: (String) -> Unit = {},
 ): SkillResult {
     val skill = cfg.skillPath(cfg.skills.javaToKotlin)
 
     // Chain step 2: local LLM for LOW files when enabled and reachable.
     if (risk == "LOW" && cfg.localModel.enabled && state.localReachable) {
+        onBackendAttempt("local:${cfg.localModel.model}")
         val r = invokeLocalLlm(
             cfg = cfg, skillPath = skill,
             javaFile = javaFile, ktFile = ktFile,
@@ -77,6 +87,7 @@ fun refine(
     // Chain step 3: Claude. If we know the window is closed AND fallback is
     // enabled, skip straight to DeepSeek for this file.
     if (!state.claudeAvailable() && cfg.fallback.enabled) {
+        onBackendAttempt("deepseek:${cfg.fallback.deepseek.model} (claude window closed)")
         return invokeDeepSeek(
             cfg = cfg, skillPath = skill,
             javaFile = javaFile, ktFile = ktFile,
@@ -85,6 +96,7 @@ fun refine(
         )
     }
 
+    onBackendAttempt("claude:${cfg.claude.models[risk] ?: cfg.claude.defaultModel}")
     val claude = invokeSkill(
         cfg = cfg, skillPath = skill,
         javaFile = javaFile, ktFile = ktFile,
@@ -100,6 +112,7 @@ fun refine(
         state.markClaudePaused(waitSec)
         // Chain step 4: DeepSeek if enabled.
         if (cfg.fallback.enabled) {
+            onBackendAttempt("deepseek:${cfg.fallback.deepseek.model} (claude rate-limited)")
             return invokeDeepSeek(
                 cfg = cfg, skillPath = skill,
                 javaFile = javaFile, ktFile = ktFile,
@@ -109,6 +122,7 @@ fun refine(
         }
         // Chain step 5: wait until the window resets, then retry Claude once.
         if (waitSec != null && waitSec > 0) Thread.sleep(minOf(waitSec, 6 * 3600L) * 1000)
+        onBackendAttempt("claude:${cfg.claude.models[risk] ?: cfg.claude.defaultModel} (window reset)")
         return invokeSkill(
             cfg = cfg, skillPath = skill,
             javaFile = javaFile, ktFile = ktFile,

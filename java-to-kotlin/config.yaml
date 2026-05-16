@@ -50,11 +50,11 @@ j2k:
   #   external:       `command` is a fully-formed script that takes
   #                   <java_in> <kt_out> (or `--manifest <path>` if it
   #                   supports batch mode) and writes the converted Kotlin.
-  strategy: passthrough
-  command: scripts/passthrough-j2k.sh
+  # strategy: passthrough
+  # command: scripts/passthrough-j2k.sh
   # To opt into real J2K via the bundled IntelliJ plugin:
-  # strategy: headless_idea
-  # command: scripts/run-j2k-headless.sh
+  strategy: headless_idea
+  command: scripts/run-j2k-headless.sh
   args: []
   timeout_seconds: 1800
 

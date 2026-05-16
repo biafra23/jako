@@ -54,7 +54,27 @@ internal val httpJson = Json { ignoreUnknownKeys = true; encodeDefaults = false 
  * completion path doesn't benefit from HTTP/2 multiplexing here. Pinning
  * 1.1 everywhere keeps both code paths boringly identical.
  */
-private val HTTP_1_1: HttpClient.Version = HttpClient.Version.HTTP_1_1
+/**
+ * Single shared client for both probe and chat traffic.
+ *
+ * Pinned to HTTP/1.1. Java's `HttpClient` defaults to HTTP/2, which over
+ * plain `http://` (no TLS, no ALPN) means sending an HTTP/2 prior-knowledge
+ * preface. LM Studio, Ollama, vLLM, and llama.cpp's bundled server all
+ * speak HTTP/1.1 only on their plain-HTTP listener — the preface hangs
+ * unanswered until the request times out. Observed cleanly against
+ * LM Studio: HTTP/2 → `HttpTimeoutException` after 3 s; HTTP/1.1 → 200
+ * in ~35 ms. DeepSeek's HTTPS endpoint also handles 1.1 fine; the
+ * one-shot completion path doesn't benefit from HTTP/2 multiplexing.
+ *
+ * Reused across calls so we don't reallocate the JDK thread pool /
+ * connection pool every request. The per-request `.timeout(...)` enforces
+ * the per-call deadline (including the connect phase), so a generous
+ * client-level connect timeout doesn't dilute caller control.
+ */
+private val client: HttpClient = HttpClient.newBuilder()
+    .version(HttpClient.Version.HTTP_1_1)
+    .connectTimeout(Duration.ofSeconds(10))
+    .build()
 
 /** Returns (httpStatus, body). Throws only on network-level errors. */
 fun postChat(
@@ -68,7 +88,6 @@ fun postChat(
 ): Pair<Int, String> {
     val req = HttpRequest.newBuilder()
         .uri(URI.create(baseUrl.trimEnd('/') + "/chat/completions"))
-        .version(HTTP_1_1)
         .timeout(Duration.ofSeconds(timeoutSeconds))
         .header("Content-Type", "application/json")
         .apply { if (!apiKey.isNullOrBlank()) header("Authorization", "Bearer $apiKey") }
@@ -85,10 +104,6 @@ fun postChat(
             )
         )
         .build()
-    val client = HttpClient.newBuilder()
-        .version(HTTP_1_1)
-        .connectTimeout(Duration.ofSeconds(10))
-        .build()
     val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
     return resp.statusCode() to resp.body()
 }
@@ -103,15 +118,10 @@ fun probeEndpoint(baseUrl: String, apiKey: String?, timeoutSeconds: Long): Boole
         baseUrl.trimEnd('/') + "/models",
         baseUrl.trimEnd('/').removeSuffix("/v1") + "/v1/models",
     ).distinct()
-    val client = HttpClient.newBuilder()
-        .version(HTTP_1_1)
-        .connectTimeout(Duration.ofSeconds(timeoutSeconds))
-        .build()
     for (u in urls) {
         runCatching {
             val req = HttpRequest.newBuilder()
                 .uri(URI.create(u))
-                .version(HTTP_1_1)
                 .timeout(Duration.ofSeconds(timeoutSeconds))
                 .apply { if (!apiKey.isNullOrBlank()) header("Authorization", "Bearer $apiKey") }
                 .GET()

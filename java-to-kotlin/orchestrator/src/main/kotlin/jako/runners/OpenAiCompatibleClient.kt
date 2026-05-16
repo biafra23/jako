@@ -8,6 +8,9 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.time.Duration
+import java.util.concurrent.ExecutionException
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeoutException
 
 /**
  * Shared OpenAI-compatible /v1/chat/completions client used by both
@@ -104,8 +107,29 @@ fun postChat(
             )
         )
         .build()
-    val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
-    return resp.statusCode() to resp.body()
+    // `HttpRequest.timeout(...)` covers connect + receiving the response
+    // status line and headers, but NOT a server that accepts the request,
+    // ACKs HTTP headers, and then hangs while generating the body. We hit
+    // exactly that on LM Studio against gemma-4-31b: 4 in-flight requests,
+    // worker process at <1% CPU, JDK `HttpClient.send` parked on
+    // `CompletableFuture.get()` forever. Wrap the whole future in
+    // `orTimeout` so a body-stall is also caught, and surface it via
+    // status=-1 — `invokeLocalLlm`'s error path already handles non-2xx
+    // responses by falling through to the Claude chain step.
+    return try {
+        val resp = client.sendAsync(req, HttpResponse.BodyHandlers.ofString())
+            .orTimeout(timeoutSeconds, TimeUnit.SECONDS)
+            .get()
+        resp.statusCode() to resp.body()
+    } catch (e: ExecutionException) {
+        when (val cause = e.cause) {
+            is TimeoutException ->
+                -1 to "local LLM timed out after ${timeoutSeconds}s (server stalled mid-response)"
+            is java.net.http.HttpTimeoutException ->
+                -1 to "local LLM HTTP timeout after ${timeoutSeconds}s"
+            else -> throw cause ?: e
+        }
+    }
 }
 
 /**

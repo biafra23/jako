@@ -4,10 +4,11 @@ import jako.AnalysisResult
 import jako.Config
 import jako.JavaSourceUnit
 import jako.RunState
+import jako.runners.J2KResult
 import jako.runners.classifyFailure
 import jako.runners.commitFiles
 import jako.runners.compileAndTest
-import jako.runners.convertJ2K
+import jako.runners.convertJ2KBatch
 import jako.runners.describeJ2K
 import jako.runners.discardUnstaged
 import kotlinx.coroutines.Dispatchers
@@ -198,7 +199,13 @@ private fun attemptGroup(
     // (which gets overwritten to "failed" by the refine/verify steps) or
     // .bak alone (which could be a stale leftover from a rename / earlier
     // workspace state with no matching current J2K run).
+    //
+    // Pending units are dispatched to J2K as a single batch (one
+    // `convertJ2KBatch` call). For `headless_idea` that means one IDE
+    // startup per cycle instead of one per file — the difference between
+    // ~9 min and ~1 min for a 26-file batch.
     val ktTargets = mutableListOf<Path>()
+    val needsJ2K = mutableListOf<Pair<JavaSourceUnit, Path>>()
     for (u in units) {
         val kt = ktTargetFor(cfg, u)
         val javaBak = kt.parent.resolve(kt.fileName.toString() + ".java.bak")
@@ -209,25 +216,38 @@ private fun attemptGroup(
             !Files.exists(originalJava)
         if (j2kAlreadyDone) {
             log("${ts()} j2k    skipped (already converted): ${u.relativePath}")
-            ktTargets.add(kt)
-            continue
+        } else {
+            needsJ2K.add(u to kt)
         }
-        log("${ts()} j2k    ${u.relativePath} -> ${kt.relativeToOrSelf(cfg.projectRoot())}")
-        val r = convertJ2K(cfg, Path.of(u.sourcePath), kt)
-        if (!r.ok) {
-            log("${ts()} j2k    FAILED for ${u.relativePath}: ${r.stderrTail.take(200)}")
-            state.mark(u.sourcePath, status = "failed", lastError = "j2k: ${r.stderrTail.take(500)}")
-            return false
-        }
-        // Stash the original Java alongside the .kt so manual review is one mv away.
-        val javaPath = Path.of(u.sourcePath)
-        val backup = kt.parent.resolve(kt.fileName.toString() + ".java.bak")
-        Files.writeString(backup, Files.readString(javaPath))
-        Files.deleteIfExists(javaPath)
-        state.mark(u.sourcePath, status = "j2k_done", ktPath = kt.toString())
         ktTargets.add(kt)
     }
-    state.save()
+
+    if (needsJ2K.isNotEmpty()) {
+        log("${ts()} j2k    batch ${needsJ2K.size} file(s): " +
+            needsJ2K.joinToString(", ") { (u, _) -> u.relativePath })
+        val batchInput = needsJ2K.map { (u, kt) -> Path.of(u.sourcePath) to kt }
+        val batch = convertJ2KBatch(cfg, batchInput)
+        log("${ts()} j2k    batch done in ${"%.1f".format(batch.elapsedSeconds)}s")
+        var anyJ2kFailed = false
+        for ((u, kt) in needsJ2K) {
+            val javaPath = Path.of(u.sourcePath)
+            val r = batch.results[javaPath]
+                ?: J2KResult(ok = false, ktPath = kt, stderrTail = "missing from batch result")
+            if (!r.ok) {
+                log("${ts()} j2k    FAILED for ${u.relativePath}: ${r.stderrTail.take(200)}")
+                state.mark(u.sourcePath, status = "failed", lastError = "j2k: ${r.stderrTail.take(500)}")
+                anyJ2kFailed = true
+                continue
+            }
+            // Stash the original Java alongside the .kt so manual review is one mv away.
+            val backup = kt.parent.resolve(kt.fileName.toString() + ".java.bak")
+            Files.writeString(backup, Files.readString(javaPath))
+            Files.deleteIfExists(javaPath)
+            state.mark(u.sourcePath, status = "j2k_done", ktPath = kt.toString())
+        }
+        state.save()
+        if (anyJ2kFailed) return false
+    }
 
     // Step 2 — refinement via backend chain, fanned out across the batch
     // up to `claude.concurrency` parallel claude/local/deepseek calls.

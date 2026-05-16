@@ -20,13 +20,16 @@ import java.nio.file.Path
  * Headless J2K driver — see plan-2-thin-orchestrator.md §2.1.
  *
  * Invoked by jako's orchestrator (when `j2k.strategy: headless_idea`)
- * as:
+ * in one of two shapes:
  *
  *     idea jakoConvert <java_in> <kt_out>
+ *     idea jakoConvert --manifest <path>
  *
- * Drives the bundled JetBrains Java→Kotlin converter (the same one the
- * IDE menu uses) on a single Java file, writes the resulting Kotlin to
- * `<kt_out>`, exits the application.
+ * The single-file form is kept for debugging and one-shots. The manifest
+ * form is what the orchestrator uses for real runs: a 20s IDE startup is
+ * fine to amortize across a batch of files but ruinous per-file. Manifest
+ * format is one `<java_in>\t<kt_out>` per line; blank lines and lines
+ * starting with `#` are ignored.
  *
  * **Threading rules learned the hard way:**
  * 1. `ApplicationStarter.main()` runs on the IDE's EDT.
@@ -59,18 +62,28 @@ class JakoConvertStarter : ApplicationStarter {
 
     override fun main(args: List<String>) {
         // args[0] is the command name itself, args[1..] are positional.
-        if (args.size != 3) {
-            System.err.println("usage: idea jakoConvert <java_in> <kt_out>")
-            haltWith(2)
-            return
+        val tail = args.drop(1)
+        val pairs: List<Pair<Path, Path>> = when {
+            tail.size == 2 && tail[0] == "--manifest" ->
+                parseManifest(Path.of(tail[1]).toAbsolutePath())
+            tail.size == 2 && !tail[0].startsWith("--") ->
+                listOf(Path.of(tail[0]).toAbsolutePath() to Path.of(tail[1]).toAbsolutePath())
+            else -> {
+                System.err.println("usage: idea jakoConvert <java_in> <kt_out>")
+                System.err.println("   or: idea jakoConvert --manifest <path>")
+                haltWith(2)
+            }
         }
-        val javaIn = Path.of(args[1]).toAbsolutePath()
-        val ktOut = Path.of(args[2]).toAbsolutePath()
-
-        if (!Files.isRegularFile(javaIn)) {
-            System.err.println("jakoConvert: input not a regular file: $javaIn")
+        if (pairs.isEmpty()) {
+            System.err.println("jakoConvert: manifest had no pairs to convert")
+            haltWith(2)
+        }
+        val missing = pairs.filterNot { (javaIn, _) -> Files.isRegularFile(javaIn) }
+        if (missing.isNotEmpty()) {
+            missing.forEach { (javaIn, _) ->
+                System.err.println("jakoConvert: input not a regular file: $javaIn")
+            }
             haltWith(1)
-            return
         }
 
         val app = ApplicationManager.getApplication()
@@ -78,28 +91,57 @@ class JakoConvertStarter : ApplicationStarter {
         // pumping EDT events while conversion runs; the pooled task
         // triggers exit when done.
         app.executeOnPooledThread {
-            val result = runCatching { convert(javaIn) }
-            result.fold(
-                onSuccess = { kotlinSource ->
-                    runCatching {
-                        Files.createDirectories(ktOut.parent)
-                        Files.writeString(ktOut, kotlinSource)
-                    }.onFailure { e ->
-                        log.warn("jakoConvert: write failed for $ktOut", e)
-                        System.err.println("jakoConvert: ${e.javaClass.simpleName}: ${e.message}")
-                        haltWith(1)
-                        return@executeOnPooledThread
-                    }
-                    log.info("jakoConvert: wrote $ktOut (${kotlinSource.length} chars)")
-                    app.invokeLater { app.exit(true, true, false) }
-                },
-                onFailure = { e ->
-                    log.warn("jakoConvert: J2K failed for $javaIn", e)
-                    System.err.println("jakoConvert: ${e.javaClass.simpleName}: ${e.message}")
-                    haltWith(1)
-                },
-            )
+            var anyFailed = false
+            for ((javaIn, ktOut) in pairs) {
+                runCatching { convert(javaIn) }.fold(
+                    onSuccess = { kotlinSource ->
+                        runCatching {
+                            Files.createDirectories(ktOut.parent)
+                            Files.writeString(ktOut, kotlinSource)
+                            log.info("jakoConvert: wrote $ktOut (${kotlinSource.length} chars)")
+                        }.onFailure { e ->
+                            log.warn("jakoConvert: write failed for $ktOut", e)
+                            System.err.println("jakoConvert: write $ktOut: ${e.javaClass.simpleName}: ${e.message}")
+                            anyFailed = true
+                        }
+                    },
+                    onFailure = { e ->
+                        log.warn("jakoConvert: J2K failed for $javaIn", e)
+                        System.err.println("jakoConvert: convert $javaIn: ${e.javaClass.simpleName}: ${e.message}")
+                        anyFailed = true
+                    },
+                )
+            }
+            if (anyFailed) {
+                haltWith(1)
+            } else {
+                app.invokeLater { app.exit(true, true, false) }
+            }
         }
+    }
+
+    /**
+     * Parses a manifest file: one `<java_in>\t<kt_out>` per line. Blank
+     * lines and lines beginning with `#` are skipped. Bad lines abort
+     * with exit 2 — silently skipping them would mask a corrupted
+     * manifest as a much-shorter-than-expected batch.
+     */
+    private fun parseManifest(path: Path): List<Pair<Path, Path>> {
+        if (!Files.isRegularFile(path)) {
+            System.err.println("jakoConvert: manifest not found: $path")
+            haltWith(1)
+        }
+        return Files.readAllLines(path)
+            .map { it.trim() }
+            .filter { it.isNotEmpty() && !it.startsWith("#") }
+            .map { line ->
+                val parts = line.split("\t")
+                if (parts.size != 2) {
+                    System.err.println("jakoConvert: bad manifest line (need <java>\\t<kt>): $line")
+                    haltWith(2)
+                }
+                Path.of(parts[0]).toAbsolutePath() to Path.of(parts[1]).toAbsolutePath()
+            }
     }
 
     /**

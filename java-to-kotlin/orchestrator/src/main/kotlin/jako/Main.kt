@@ -26,7 +26,7 @@ fun main(rawArgs: Array<String>) {
         System.err.println("config not found: $cfgPath")
         exitProcess(2)
     }
-    val cfg = loadConfig(cfgPath)
+    val cfg = loadConfig(cfgPath).withOverrides(args)
 
     val t0 = System.currentTimeMillis()
     when (args.phase) {
@@ -62,13 +62,34 @@ internal data class Args(
     val phase: String = "all",
     val force: Boolean = false,
     val only: List<String> = emptyList(),
+    /** Override `project.root` from config.yaml. Both `--project` and
+     *  `--module` are optional; if omitted the config file value is used.
+     *  Lets the same `gradle :orchestrator:run` invocation point at
+     *  different target projects without editing config.yaml. */
+    val project: String? = null,
+    val module: String? = null,
 )
+
+/**
+ * Apply CLI overrides on top of the loaded config. Each override is a
+ * pure replacement — passing `--project ~/foo` swaps `project.root`
+ * outright. Empty string is treated as "not provided" so callers can
+ * pass `--project ""` defensively without clobbering the config.
+ */
+internal fun Config.withOverrides(args: Args): Config {
+    val newRoot = args.project?.takeIf { it.isNotBlank() } ?: this.project.root
+    val newModule = args.module?.takeIf { it.isNotBlank() } ?: this.project.module
+    if (newRoot == this.project.root && newModule == this.project.module) return this
+    return this.copy(project = this.project.copy(root = newRoot, module = newModule))
+}
 
 private fun parseArgs(rawArgs: Array<String>): Args {
     var config = "config.yaml"
     var phase = "all"
     var force = false
     val only = mutableListOf<String>()
+    var project: String? = null
+    var module: String? = null
 
     var i = 0
     while (i < rawArgs.size) {
@@ -84,6 +105,8 @@ private fun parseArgs(rawArgs: Array<String>): Args {
                 }
                 continue
             }
+            "--project" -> { project = rawArgs.getOrNull(++i) ?: missing(arg) }
+            "--module" -> { module = rawArgs.getOrNull(++i) ?: missing(arg) }
             else -> {
                 System.err.println("unknown argument: $arg")
                 printHelp()
@@ -92,7 +115,7 @@ private fun parseArgs(rawArgs: Array<String>): Args {
         }
         i++
     }
-    return Args(config, phase, force, only)
+    return Args(config, phase, force, only, project, module)
 }
 
 private fun missing(flag: String): Nothing {
@@ -107,6 +130,8 @@ private fun printHelp() {
 
           --config PATH        config.yaml (default: ./config.yaml)
           --phase PHASE        analyze | scaffold | convert | report | all  (default: all)
+          --project PATH       override config's project.root (the target Gradle/Maven repo)
+          --module NAME        override config's project.module (Gradle subproject to convert)
           --force              ignore cached analysis/state, redo work
           --only PATH...       restrict convert to specific source files
           -h, --help           print this help and exit

@@ -14,6 +14,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -108,20 +111,41 @@ private fun parallelRefine(
                 async(Dispatchers.IO) {
                     sem.withPermit {
                         log("${ts()} refine ${kt.relativeToOrSelf(cfg.projectRoot())} (risk=${u.risk})")
-                        runCatching { refineOne(cfg, refineState, u, kt, extra) }
-                            .fold(
-                                onSuccess = { (ok, model, tail) ->
-                                    RefineOutcome(u, kt, ok, model, tail)
-                                },
-                                onFailure = { e ->
-                                    // Compute the model we would have picked
-                                    // had the call reached a backend, so RunState
-                                    // shows an accurate intended-model name
-                                    // rather than the misleading "?" sentinel.
-                                    val intendedModel = intendedModelFor(cfg, refineState, u.risk)
-                                    RefineOutcome(u, kt, false, intendedModel, "exception: ${e.message ?: e.javaClass.simpleName}")
-                                },
-                            )
+                        val started = System.currentTimeMillis()
+                        // Heartbeat so the per-file silence (a single refine can run
+                        // 1-3 min on Haiku) doesn't look like a hang. Tells the user
+                        // "still working" + elapsed seconds, every HEARTBEAT_INTERVAL_MS.
+                        // The launch lives inside the async's CoroutineScope; the
+                        // finally guarantees cancellation so async can complete.
+                        val heartbeat = launch {
+                            while (isActive) {
+                                delay(HEARTBEAT_INTERVAL_MS)
+                                val elapsed = (System.currentTimeMillis() - started) / 1000
+                                log("${ts()}   ↳ ${kt.relativeToOrSelf(cfg.projectRoot())} — refining for ${elapsed}s")
+                            }
+                        }
+                        val ktRel = kt.relativeToOrSelf(cfg.projectRoot())
+                        val onBackend: (String) -> Unit = { backend ->
+                            log("${ts()}   ↳ $ktRel → $backend")
+                        }
+                        try {
+                            runCatching { refineOne(cfg, refineState, u, kt, extra, onBackend) }
+                                .fold(
+                                    onSuccess = { (ok, model, tail) ->
+                                        RefineOutcome(u, kt, ok, model, tail)
+                                    },
+                                    onFailure = { e ->
+                                        // Compute the model we would have picked
+                                        // had the call reached a backend, so RunState
+                                        // shows an accurate intended-model name
+                                        // rather than the misleading "?" sentinel.
+                                        val intendedModel = intendedModelFor(cfg, refineState, u.risk)
+                                        RefineOutcome(u, kt, false, intendedModel, "exception: ${e.message ?: e.javaClass.simpleName}")
+                                    },
+                                )
+                        } finally {
+                            heartbeat.cancel()
+                        }
                     }
                 }
             }.awaitAll()
@@ -129,12 +153,15 @@ private fun parallelRefine(
     }
 }
 
+private const val HEARTBEAT_INTERVAL_MS: Long = 30_000
+
 private fun refineOne(
     cfg: Config,
     refineState: RefineState,
     unit: JavaSourceUnit,
     ktFile: Path,
     extra: String = "",
+    onBackendAttempt: (String) -> Unit = {},
 ): Triple<Boolean, String, String> {
     val res = refine(
         cfg = cfg,
@@ -145,6 +172,7 @@ private fun refineOne(
         cwd = cfg.projectRoot(),
         isTest = unit.isTest,
         extraUserPrompt = extra,
+        onBackendAttempt = onBackendAttempt,
     )
     val tail = if (res.stderrTail.isNotBlank()) res.stderrTail else res.stdoutTail
     return Triple(res.ok, res.model, tail)

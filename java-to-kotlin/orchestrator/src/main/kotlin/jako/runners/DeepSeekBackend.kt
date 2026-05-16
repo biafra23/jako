@@ -26,19 +26,11 @@ private fun buildMessages(skillText: String, javaFile: Path, ktFile: Path, isTes
     val user = buildString {
         appendLine("Refine the Kotlin file (currently at ${ktFile.fileName}) using the JetBrains java-to-kotlin skill conventions.")
         appendLine()
-        if (isTest) {
-            appendLine("Test-conversion constraints:")
-            appendLine("  - This is a test file. Production code in src/jvmMain/kotlin is already Kotlin — call it idiomatically (property syntax for Java-style getters, named/default args).")
-            appendLine("  - Keep the test-framework annotations the original used (@Test, @BeforeEach, @ParameterizedTest, @ValueSource, @MethodSource, @DisplayName, etc.) — they work the same in Kotlin.")
-            appendLine("  - Preserve test semantics exactly: same assertions, same parametrization, same fixture setup.")
-            appendLine("  - Prefer kotlin.test assertions (assertEquals, assertTrue, assertFailsWith) when the rewrite from JUnit's Assertions.* is mechanical; otherwise leave the JUnit assertion alone.")
-            appendLine("  - No new external dependencies.")
-        } else {
-            appendLine("Constraints:")
-            appendLine("  - Public API must remain Java-callable; Java tests in src/jvmTest/java compile against this file.")
-            appendLine("  - Add @JvmStatic / @JvmField / @JvmOverloads / @JvmName as needed for interop.")
-            appendLine("  - No new external dependencies.")
-        }
+        appendLine(refineConstraintsBlock(isTest))
+        // Same fenced-code-block output instructions as the local-LLM
+        // backend — DeepSeek is invoked via the same OpenAI-compatible
+        // path, and the chat client extracts the .kt from a single
+        // ```kotlin block.
         appendLine("  - Return the FULL final .kt file, nothing else, inside a single ```kotlin code block.")
         appendLine("  - Do not deliberate or print reasoning — output the code block and stop.")
         appendLine()

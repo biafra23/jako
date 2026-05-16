@@ -66,22 +66,8 @@ private fun buildUserPrompt(javaFile: Path, ktFile: Path, isTest: Boolean, extra
         "  - You MUST NOT run gradle, kotlinc, ./gradlew, or any compile/test command. The orchestrator runs the gate after this call. Running it yourself just burns turn budget.",
         "",
     )
-    val constraints = if (isTest) listOf(
-        "Test-conversion constraints (apply only to $ktFile):",
-        "  - This is a test file. Production code in src/jvmMain/kotlin is already Kotlin — call it idiomatically (property syntax for Java-style getters, named/default args, no manual boxing of primitives).",
-        "  - Keep the test-framework annotations the original used (@Test, @BeforeEach, @AfterEach, @ParameterizedTest, @ValueSource, @MethodSource, @DisplayName, etc.) — they work the same in Kotlin.",
-        "  - Preserve test semantics exactly: same assertions, same parametrization, same fixture setup, same failure cases.",
-        "  - For plain-shape assertions (equality, truthiness, exception expectations) prefer the kotlin.test API (assertEquals, assertTrue, assertFailsWith) when the original used JUnit's Assertions.* — but only when the rewrite is mechanical. If a JUnit-specific assertion (assertThrows with executable, Hamcrest, AssertJ) doesn't have a clean Kotlin-test equivalent, leave it alone.",
-        "  - Do not introduce new external dependencies.",
-        "",
-    ) else listOf(
-        "Interop constraints (apply only to $ktFile):",
-        "  - Public API must remain Java-callable; Java tests in src/jvmTest/java compile against this file.",
-        "  - Add @JvmStatic / @JvmField / @JvmOverloads / @JvmName as needed for interop.",
-        "  - Do not introduce new external dependencies.",
-        "",
-    )
     val tail = mutableListOf(
+        "",
         "Apply the JetBrains java-to-kotlin skill conventions to the refinement.",
         "Do not deliberate or print reasoning — edit the file and stop.",
     )
@@ -92,7 +78,7 @@ private fun buildUserPrompt(javaFile: Path, ktFile: Path, isTest: Boolean, extra
         tail.add("")
         tail.add("Use that context to refine $ktFile only. If the diagnostic points to a different file, ignore it — that file is fixed by a separate call.")
     }
-    return (scope + constraints + tail).joinToString("\n")
+    return (scope + listOf(refineConstraintsBlock(isTest)) + tail).joinToString("\n")
 }
 
 private fun looksRateLimited(stdout: String, stderr: String): Boolean =

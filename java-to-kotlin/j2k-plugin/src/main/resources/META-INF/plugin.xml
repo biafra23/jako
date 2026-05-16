@@ -1,0 +1,23 @@
+<idea-plugin>
+  <id>com.biafra23.jako.j2k</id>
+  <name>jako headless J2K driver</name>
+  <vendor>biafra23</vendor>
+  <description><![CDATA[
+    Drives the bundled JetBrains Java→Kotlin converter (J2K) from a
+    headless IntelliJ instance. Registered as the `jakoConvert`
+    ApplicationStarter: pass `<java_in> <kt_out>` as args and the
+    plugin writes the converted Kotlin to <kt_out>.
+
+    Only loaded by the jako orchestrator's `headless_idea` j2k.strategy.
+  ]]></description>
+
+  <depends>com.intellij.modules.platform</depends>
+  <depends>com.intellij.modules.java</depends>
+  <depends>org.jetbrains.kotlin</depends>
+
+  <applicationListeners />
+
+  <extensions defaultExtensionNs="com.intellij">
+    <appStarter implementation="jako.j2k.JakoConvertStarter" />
+  </extensions>
+</idea-plugin>

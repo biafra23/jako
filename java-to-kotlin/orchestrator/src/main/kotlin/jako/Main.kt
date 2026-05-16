@@ -37,11 +37,19 @@ fun main(rawArgs: Array<String>) {
         if (args.worktree.isNullOrBlank()) afterOverrides
         else {
             val sourceRepo = afterOverrides.projectRoot()
-            // Run through Config.resolve so the same `~`-expansion and
-            // base-relative rules that apply to config.yaml paths also
-            // apply here — a bare `Path.of("~/foo").toAbsolutePath()`
-            // produces literal `<cwd>/~/foo` because Java doesn't expand `~`.
-            val wtPath = afterOverrides.resolve(args.worktree)
+            // Expand `~` / `~/...` to $HOME (Java doesn't; the shell does,
+            // and Gradle's `--args` quoting suppresses shell expansion);
+            // anything else is left to `Path.toAbsolutePath()`, which keeps
+            // standard CLI semantics (relatives resolve against CWD, not
+            // against config.yaml's directory). `~otheruser/...` syntax is
+            // not supported and falls through unchanged.
+            val wtRaw = args.worktree
+            val wtPath = when {
+                wtRaw == "~" -> Path.of(System.getProperty("user.home"))
+                wtRaw.startsWith("~/") ->
+                    Path.of(System.getProperty("user.home"), wtRaw.removePrefix("~/"))
+                else -> Path.of(wtRaw)
+            }.toAbsolutePath().normalize()
             val module = afterOverrides.project.module.ifBlank { "all" }
             val branch = args.worktreeBranch?.ifBlank { null } ?: "jako/$module"
             val effective = ensureWorktree(sourceRepo, wtPath, branch)

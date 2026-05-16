@@ -3,6 +3,7 @@ package jako
 import jako.phase0.runAnalyze
 import jako.phase1.runScaffold
 import jako.phase2.runConvert
+import jako.runners.ensureWorktree
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.system.exitProcess
@@ -26,7 +27,34 @@ fun main(rawArgs: Array<String>) {
         System.err.println("config not found: $cfgPath")
         exitProcess(2)
     }
-    val cfg = loadConfig(cfgPath).withOverrides(args)
+    // Layering: config-file values, then --project / --module overrides, then
+    // (optional) --worktree mapping. Each step preserves `Config.base` (the
+    // config-file directory used for relative-path resolution); without that,
+    // skills/scripts/vendored-skills paths in config.yaml would silently
+    // start resolving against the JVM's CWD the moment any CLI override is
+    // passed.
+    val cfg = loadConfig(cfgPath).withOverrides(args).let { afterOverrides ->
+        if (args.worktree.isNullOrBlank()) afterOverrides
+        else {
+            val sourceRepo = afterOverrides.projectRoot()
+            val wtPath = Path.of(args.worktree).toAbsolutePath().normalize()
+            val module = afterOverrides.project.module.ifBlank { "all" }
+            val branch = args.worktreeBranch?.ifBlank { null } ?: "jako/$module"
+            val effective = ensureWorktree(sourceRepo, wtPath, branch)
+            System.err.println("[worktree] $sourceRepo  ->  $effective  (branch: $branch)")
+            // Rebind both project.root AND state.dir so per-worktree runs
+            // don't share state. `effective.resolve(base.state.dir)` is a
+            // no-op when state.dir is absolute (user-set absolute paths
+            // are preserved as-is) and pins a relative state.dir inside
+            // the worktree (the common case).
+            afterOverrides.copy(
+                project = afterOverrides.project.copy(root = effective.toString()),
+                state = afterOverrides.state.copy(
+                    dir = effective.resolve(afterOverrides.state.dir).toString(),
+                ),
+            ).apply { base = afterOverrides.base }
+        }
+    }
 
     val t0 = System.currentTimeMillis()
     when (args.phase) {
@@ -68,6 +96,19 @@ internal data class Args(
      *  different target projects without editing config.yaml. */
     val project: String? = null,
     val module: String? = null,
+    /**
+     * Run jako against a git worktree of `project.root` instead of the
+     * main checkout. The worktree is created on first invocation
+     * (idempotent on later runs) and all subsequent phases — scaffold's
+     * file moves, convert's commits — happen there. Lets a conversion
+     * proceed without ever modifying the source repo's main working
+     * tree, while keeping git history shared so commit_per_file still
+     * works naturally.
+     */
+    val worktree: String? = null,
+    /** Branch the worktree checks out. Defaults to `jako/<module>`.
+     *  If the branch doesn't exist yet, it's created. */
+    val worktreeBranch: String? = null,
 )
 
 /**
@@ -100,6 +141,8 @@ private fun parseArgs(rawArgs: Array<String>): Args {
     val only = mutableListOf<String>()
     var project: String? = null
     var module: String? = null
+    var worktree: String? = null
+    var worktreeBranch: String? = null
 
     var i = 0
     while (i < rawArgs.size) {
@@ -117,6 +160,8 @@ private fun parseArgs(rawArgs: Array<String>): Args {
             }
             "--project" -> { project = rawArgs.getOrNull(++i) ?: missing(arg) }
             "--module" -> { module = rawArgs.getOrNull(++i) ?: missing(arg) }
+            "--worktree" -> { worktree = rawArgs.getOrNull(++i) ?: missing(arg) }
+            "--worktree-branch" -> { worktreeBranch = rawArgs.getOrNull(++i) ?: missing(arg) }
             else -> {
                 System.err.println("unknown argument: $arg")
                 printHelp()
@@ -125,7 +170,7 @@ private fun parseArgs(rawArgs: Array<String>): Args {
         }
         i++
     }
-    return Args(config, phase, force, only, project, module)
+    return Args(config, phase, force, only, project, module, worktree, worktreeBranch)
 }
 
 private fun missing(flag: String): Nothing {
@@ -138,13 +183,19 @@ private fun printHelp() {
         """
         Thin Java -> Kotlin orchestrator (J2K + JetBrains skill + claude -p).
 
-          --config PATH        config.yaml (default: ./config.yaml)
-          --phase PHASE        analyze | scaffold | convert | report | all  (default: all)
-          --project PATH       override config's project.root (the target Gradle/Maven repo)
-          --module NAME        override config's project.module (Gradle subproject to convert)
-          --force              ignore cached analysis/state, redo work
-          --only PATH...       restrict convert to specific source files
-          -h, --help           print this help and exit
+          --config PATH         config.yaml (default: ./config.yaml)
+          --phase PHASE         analyze | scaffold | convert | report | all  (default: all)
+          --project PATH        override config's project.root (target Gradle/Maven repo)
+          --module NAME         override config's project.module (Gradle subproject)
+          --worktree PATH       run in a git worktree of project.root checked out
+                                at PATH (created on first invocation, reused after).
+                                Source repo's main working tree stays untouched;
+                                all per-file commits land on a side branch.
+          --worktree-branch B   branch the worktree checks out / creates
+                                (default: jako/<module>)
+          --force               ignore cached analysis/state, redo work
+          --only PATH...        restrict convert to specific source files
+          -h, --help            print this help and exit
         """.trimIndent()
     )
 }

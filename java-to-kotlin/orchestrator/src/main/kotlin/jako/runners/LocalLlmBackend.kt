@@ -19,16 +19,25 @@ private fun apiKey(cfg: Config): String? {
     return System.getenv(env)
 }
 
-private fun buildMessages(skillText: String, javaFile: Path, ktFile: Path, extra: String): List<ChatMessage> {
+private fun buildMessages(skillText: String, javaFile: Path, ktFile: Path, isTest: Boolean, extra: String): List<ChatMessage> {
     val javaSrc = if (Files.exists(javaFile)) Files.readString(javaFile) else ""
     val ktSrc = if (Files.exists(ktFile)) Files.readString(ktFile) else ""
     val user = buildString {
         appendLine("Refine the Kotlin file (currently at ${ktFile.fileName}) using the JetBrains java-to-kotlin skill conventions.")
         appendLine()
-        appendLine("Constraints:")
-        appendLine("  - Public API must remain Java-callable; Java tests in src/jvmTest/java compile against this file.")
-        appendLine("  - Add @JvmStatic / @JvmField / @JvmOverloads / @JvmName as needed for interop.")
-        appendLine("  - No new external dependencies.")
+        if (isTest) {
+            appendLine("Test-conversion constraints:")
+            appendLine("  - This is a test file. Production code in src/jvmMain/kotlin is already Kotlin — call it idiomatically (property syntax for Java-style getters, named/default args).")
+            appendLine("  - Keep the test-framework annotations the original used (@Test, @BeforeEach, @ParameterizedTest, @ValueSource, @MethodSource, @DisplayName, etc.) — they work the same in Kotlin.")
+            appendLine("  - Preserve test semantics exactly: same assertions, same parametrization, same fixture setup.")
+            appendLine("  - Prefer kotlin.test assertions (assertEquals, assertTrue, assertFailsWith) when the rewrite from JUnit's Assertions.* is mechanical; otherwise leave the JUnit assertion alone.")
+            appendLine("  - No new external dependencies.")
+        } else {
+            appendLine("Constraints:")
+            appendLine("  - Public API must remain Java-callable; Java tests in src/jvmTest/java compile against this file.")
+            appendLine("  - Add @JvmStatic / @JvmField / @JvmOverloads / @JvmName as needed for interop.")
+            appendLine("  - No new external dependencies.")
+        }
         appendLine("  - Return the FULL final .kt file, nothing else, inside a single ```kotlin code block.")
         appendLine("  - Do not deliberate or print reasoning — output the code block and stop.")
         appendLine()
@@ -60,13 +69,14 @@ fun invokeLocalLlm(
     skillPath: Path,
     javaFile: Path,
     ktFile: Path,
+    isTest: Boolean = false,
     extraUserPrompt: String = "",
 ): SkillResult {
     if (!Files.exists(skillPath)) {
         error("skill file not found at $skillPath")
     }
     val skill = Files.readString(skillPath)
-    val messages = buildMessages(skill, javaFile, ktFile, extraUserPrompt)
+    val messages = buildMessages(skill, javaFile, ktFile, isTest, extraUserPrompt)
 
     val t0 = System.currentTimeMillis()
     val (status, body) = postChat(

@@ -55,6 +55,7 @@ fun refine(
     ktFile: Path,
     risk: String,
     cwd: Path,
+    isTest: Boolean = false,
     extraUserPrompt: String = "",
 ): SkillResult {
     val skill = cfg.skillPath(cfg.skills.javaToKotlin)
@@ -64,6 +65,7 @@ fun refine(
         val r = invokeLocalLlm(
             cfg = cfg, skillPath = skill,
             javaFile = javaFile, ktFile = ktFile,
+            isTest = isTest,
             extraUserPrompt = extraUserPrompt,
         )
         if (r.ok) return r
@@ -78,6 +80,7 @@ fun refine(
         return invokeDeepSeek(
             cfg = cfg, skillPath = skill,
             javaFile = javaFile, ktFile = ktFile,
+            isTest = isTest,
             extraUserPrompt = extraUserPrompt,
         )
     }
@@ -86,6 +89,7 @@ fun refine(
         cfg = cfg, skillPath = skill,
         javaFile = javaFile, ktFile = ktFile,
         risk = risk, cwd = cwd,
+        isTest = isTest,
         extraUserPrompt = extraUserPrompt,
         onRateLimit = "report",
     )
@@ -99,6 +103,7 @@ fun refine(
             return invokeDeepSeek(
                 cfg = cfg, skillPath = skill,
                 javaFile = javaFile, ktFile = ktFile,
+                isTest = isTest,
                 extraUserPrompt = extraUserPrompt,
             )
         }
@@ -108,6 +113,7 @@ fun refine(
             cfg = cfg, skillPath = skill,
             javaFile = javaFile, ktFile = ktFile,
             risk = risk, cwd = cwd,
+            isTest = isTest,
             extraUserPrompt = extraUserPrompt,
             onRateLimit = "sleep",
         )

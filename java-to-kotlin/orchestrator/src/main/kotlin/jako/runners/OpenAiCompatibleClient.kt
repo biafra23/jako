@@ -54,7 +54,7 @@ internal val httpJson = Json { ignoreUnknownKeys = true; encodeDefaults = false 
  * completion path doesn't benefit from HTTP/2 multiplexing here. Pinning
  * 1.1 everywhere keeps both code paths boringly identical.
  */
-private val HTTP1: HttpClient.Version = HttpClient.Version.HTTP_1_1
+private val HTTP_1_1: HttpClient.Version = HttpClient.Version.HTTP_1_1
 
 /** Returns (httpStatus, body). Throws only on network-level errors. */
 fun postChat(
@@ -68,7 +68,7 @@ fun postChat(
 ): Pair<Int, String> {
     val req = HttpRequest.newBuilder()
         .uri(URI.create(baseUrl.trimEnd('/') + "/chat/completions"))
-        .version(HTTP1)
+        .version(HTTP_1_1)
         .timeout(Duration.ofSeconds(timeoutSeconds))
         .header("Content-Type", "application/json")
         .apply { if (!apiKey.isNullOrBlank()) header("Authorization", "Bearer $apiKey") }
@@ -86,7 +86,7 @@ fun postChat(
         )
         .build()
     val client = HttpClient.newBuilder()
-        .version(HTTP1)
+        .version(HTTP_1_1)
         .connectTimeout(Duration.ofSeconds(10))
         .build()
     val resp = client.send(req, HttpResponse.BodyHandlers.ofString())
@@ -104,14 +104,14 @@ fun probeEndpoint(baseUrl: String, apiKey: String?, timeoutSeconds: Long): Boole
         baseUrl.trimEnd('/').removeSuffix("/v1") + "/v1/models",
     ).distinct()
     val client = HttpClient.newBuilder()
-        .version(HTTP1)
+        .version(HTTP_1_1)
         .connectTimeout(Duration.ofSeconds(timeoutSeconds))
         .build()
     for (u in urls) {
         runCatching {
             val req = HttpRequest.newBuilder()
                 .uri(URI.create(u))
-                .version(HTTP1)
+                .version(HTTP_1_1)
                 .timeout(Duration.ofSeconds(timeoutSeconds))
                 .apply { if (!apiKey.isNullOrBlank()) header("Authorization", "Bearer $apiKey") }
                 .GET()

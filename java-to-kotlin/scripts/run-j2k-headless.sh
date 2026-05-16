@@ -19,10 +19,13 @@
 
 set -euo pipefail
 
+# `--args` is a single string that Gradle splits with shell-style quoting,
+# so each path needs explicit quoting to survive a parent directory with
+# spaces in its name (e.g. `~/Source Files/jako`).
 if [[ $# -eq 2 && "$1" == "--manifest" ]]; then
-  ide_args="jakoConvert --manifest $2"
+  ide_args=$(printf 'jakoConvert --manifest "%s"' "$2")
 elif [[ $# -eq 2 ]]; then
-  ide_args="jakoConvert $1 $2"
+  ide_args=$(printf 'jakoConvert "%s" "%s"' "$1" "$2")
 else
   echo "usage: $0 <java_in> <kt_out>" >&2
   echo "   or: $0 --manifest <path>" >&2

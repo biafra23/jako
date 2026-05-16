@@ -47,7 +47,12 @@ intellijPlatform {
     }
 }
 
-// The plugin only ever runs headlessly via `idea.sh ourCommand <args>`;
-// we don't need or want a `runIde` task for it. The `buildPlugin` task
-// produces the .zip that the orchestrator points `idea.sh` at via
-// `--plugin path/to/jako-j2k.zip`.
+// The orchestrator drives this plugin via the `runIde` task that the
+// IntelliJ Platform Gradle plugin auto-registers — see
+// scripts/run-j2k-headless.sh. `runIde` builds the sandbox + launches a
+// headless IntelliJ with this plugin loaded; our `jakoConvert`
+// ApplicationStarter then runs and exits.
+//
+// `buildPlugin` produces a redistributable .zip for users who want to
+// drop the plugin into a separately-managed IntelliJ instance (and is
+// what CI uses to verify the plugin packages cleanly).

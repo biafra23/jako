@@ -37,7 +37,11 @@ fun main(rawArgs: Array<String>) {
         if (args.worktree.isNullOrBlank()) afterOverrides
         else {
             val sourceRepo = afterOverrides.projectRoot()
-            val wtPath = Path.of(args.worktree).toAbsolutePath().normalize()
+            // Run through Config.resolve so the same `~`-expansion and
+            // base-relative rules that apply to config.yaml paths also
+            // apply here — a bare `Path.of("~/foo").toAbsolutePath()`
+            // produces literal `<cwd>/~/foo` because Java doesn't expand `~`.
+            val wtPath = afterOverrides.resolve(args.worktree)
             val module = afterOverrides.project.module.ifBlank { "all" }
             val branch = args.worktreeBranch?.ifBlank { null } ?: "jako/$module"
             val effective = ensureWorktree(sourceRepo, wtPath, branch)

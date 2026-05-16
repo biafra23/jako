@@ -3,6 +3,7 @@ package jako
 import jako.phase0.runAnalyze
 import jako.phase1.runScaffold
 import jako.phase2.runConvert
+import jako.runners.ensureWorktree
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.system.exitProcess
@@ -26,7 +27,23 @@ fun main(rawArgs: Array<String>) {
         System.err.println("config not found: $cfgPath")
         exitProcess(2)
     }
-    val cfg = loadConfig(cfgPath)
+    val cfg = loadConfig(cfgPath).let { base ->
+        // --worktree creates (or reuses) a git worktree of the configured
+        // project.root and rebinds project.root onto it. All subsequent
+        // phases (analyze, scaffold, convert) run against the worktree —
+        // the main checkout of the source repo is never touched.
+        // Idempotent: if the worktree already exists, it's reused as-is.
+        if (args.worktree.isNullOrBlank()) base
+        else {
+            val sourceRepo = base.projectRoot()
+            val wtPath = Path.of(args.worktree).toAbsolutePath().normalize()
+            val module = base.project.module.ifBlank { "all" }
+            val branch = args.worktreeBranch?.ifBlank { null } ?: "jako/$module"
+            val effective = ensureWorktree(sourceRepo, wtPath, branch)
+            System.err.println("[worktree] $sourceRepo  ->  $effective  (branch: $branch)")
+            base.copy(project = base.project.copy(root = effective.toString()))
+        }
+    }
 
     val t0 = System.currentTimeMillis()
     when (args.phase) {
@@ -62,6 +79,19 @@ internal data class Args(
     val phase: String = "all",
     val force: Boolean = false,
     val only: List<String> = emptyList(),
+    /**
+     * Run jako against a git worktree of `project.root` instead of the
+     * main checkout. The worktree is created on first invocation
+     * (idempotent on later runs) and all subsequent phases — scaffold's
+     * file moves, convert's commits — happen there. Lets a conversion
+     * proceed without ever modifying the source repo's main working
+     * tree, while keeping git history shared so commit_per_file still
+     * works naturally.
+     */
+    val worktree: String? = null,
+    /** Branch the worktree checks out. Defaults to `jako/<module>`.
+     *  If the branch doesn't exist yet, it's created. */
+    val worktreeBranch: String? = null,
 )
 
 private fun parseArgs(rawArgs: Array<String>): Args {
@@ -69,6 +99,8 @@ private fun parseArgs(rawArgs: Array<String>): Args {
     var phase = "all"
     var force = false
     val only = mutableListOf<String>()
+    var worktree: String? = null
+    var worktreeBranch: String? = null
 
     var i = 0
     while (i < rawArgs.size) {
@@ -84,6 +116,8 @@ private fun parseArgs(rawArgs: Array<String>): Args {
                 }
                 continue
             }
+            "--worktree" -> { worktree = rawArgs.getOrNull(++i) ?: missing(arg) }
+            "--worktree-branch" -> { worktreeBranch = rawArgs.getOrNull(++i) ?: missing(arg) }
             else -> {
                 System.err.println("unknown argument: $arg")
                 printHelp()
@@ -92,7 +126,7 @@ private fun parseArgs(rawArgs: Array<String>): Args {
         }
         i++
     }
-    return Args(config, phase, force, only)
+    return Args(config, phase, force, only, worktree, worktreeBranch)
 }
 
 private fun missing(flag: String): Nothing {
@@ -105,11 +139,17 @@ private fun printHelp() {
         """
         Thin Java -> Kotlin orchestrator (J2K + JetBrains skill + claude -p).
 
-          --config PATH        config.yaml (default: ./config.yaml)
-          --phase PHASE        analyze | scaffold | convert | report | all  (default: all)
-          --force              ignore cached analysis/state, redo work
-          --only PATH...       restrict convert to specific source files
-          -h, --help           print this help and exit
+          --config PATH         config.yaml (default: ./config.yaml)
+          --phase PHASE         analyze | scaffold | convert | report | all  (default: all)
+          --worktree PATH       run in a git worktree of project.root checked out
+                                at PATH (created on first invocation, reused after).
+                                Source repo's main working tree stays untouched;
+                                all per-file commits land on a side branch.
+          --worktree-branch B   branch the worktree checks out / creates
+                                (default: jako/<module>)
+          --force               ignore cached analysis/state, redo work
+          --only PATH...        restrict convert to specific source files
+          -h, --help            print this help and exit
         """.trimIndent()
     )
 }

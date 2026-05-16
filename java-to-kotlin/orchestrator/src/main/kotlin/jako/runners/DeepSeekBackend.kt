@@ -20,16 +20,17 @@ private fun apiKey(cfg: Config): String {
     return key
 }
 
-private fun buildMessages(skillText: String, javaFile: Path, ktFile: Path, extra: String): List<ChatMessage> {
+private fun buildMessages(skillText: String, javaFile: Path, ktFile: Path, isTest: Boolean, extra: String): List<ChatMessage> {
     val javaSrc = if (Files.exists(javaFile)) Files.readString(javaFile) else ""
     val ktSrc = if (Files.exists(ktFile)) Files.readString(ktFile) else ""
     val user = buildString {
         appendLine("Refine the Kotlin file (currently at ${ktFile.fileName}) using the JetBrains java-to-kotlin skill conventions.")
         appendLine()
-        appendLine("Constraints:")
-        appendLine("  - Public API must remain Java-callable; Java tests in src/jvmTest/java compile against this file.")
-        appendLine("  - Add @JvmStatic / @JvmField / @JvmOverloads / @JvmName as needed for interop.")
-        appendLine("  - No new external dependencies.")
+        appendLine(refineConstraintsBlock(isTest))
+        // Same fenced-code-block output instructions as the local-LLM
+        // backend — DeepSeek is invoked via the same OpenAI-compatible
+        // path, and the chat client extracts the .kt from a single
+        // ```kotlin block.
         appendLine("  - Return the FULL final .kt file, nothing else, inside a single ```kotlin code block.")
         appendLine("  - Do not deliberate or print reasoning — output the code block and stop.")
         appendLine()
@@ -55,6 +56,7 @@ fun invokeDeepSeek(
     skillPath: Path,
     javaFile: Path,
     ktFile: Path,
+    isTest: Boolean = false,
     extraUserPrompt: String = "",
 ): SkillResult {
     if (!Files.exists(skillPath)) {
@@ -62,7 +64,7 @@ fun invokeDeepSeek(
             "before enabling DeepSeek fallback.")
     }
     val skill = Files.readString(skillPath)
-    val messages = buildMessages(skill, javaFile, ktFile, extraUserPrompt)
+    val messages = buildMessages(skill, javaFile, ktFile, isTest, extraUserPrompt)
 
     val t0 = System.currentTimeMillis()
     val (status, body) = postChat(

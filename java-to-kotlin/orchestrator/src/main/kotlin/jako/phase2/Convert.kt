@@ -143,6 +143,7 @@ private fun refineOne(
         ktFile = ktFile,
         risk = unit.risk,
         cwd = cfg.projectRoot(),
+        isTest = unit.isTest,
         extraUserPrompt = extra,
     )
     val tail = if (res.stderrTail.isNotBlank()) res.stderrTail else res.stdoutTail

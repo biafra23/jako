@@ -54,8 +54,8 @@ private fun resolveCli(cfg: Config): String {
 private fun modelForRisk(cfg: Config, risk: String): String =
     cfg.claude.models[risk] ?: cfg.claude.defaultModel
 
-private fun buildUserPrompt(javaFile: Path, ktFile: Path, extra: String): String {
-    val lines = mutableListOf(
+private fun buildUserPrompt(javaFile: Path, ktFile: Path, isTest: Boolean, extra: String): String {
+    val scope = listOf(
         "Task: refine the single Kotlin file at $ktFile so it is the idiomatic-Kotlin equivalent of $javaFile.",
         "",
         "SCOPE — strict:",
@@ -65,22 +65,20 @@ private fun buildUserPrompt(javaFile: Path, ktFile: Path, extra: String): String
         "  - You MAY read any source file in the project (the original .java, sibling .kt, .java in the same cycle) to understand cross-file types and signatures.",
         "  - You MUST NOT run gradle, kotlinc, ./gradlew, or any compile/test command. The orchestrator runs the gate after this call. Running it yourself just burns turn budget.",
         "",
-        "Interop constraints (apply only to $ktFile):",
-        "  - Public API must remain Java-callable; Java tests in src/jvmTest/java compile against this file.",
-        "  - Add @JvmStatic / @JvmField / @JvmOverloads / @JvmName as needed for interop.",
-        "  - Do not introduce new external dependencies.",
+    )
+    val tail = mutableListOf(
         "",
         "Apply the JetBrains java-to-kotlin skill conventions to the refinement.",
         "Do not deliberate or print reasoning — edit the file and stop.",
     )
     if (extra.isNotBlank()) {
-        lines.add("")
-        lines.add("Additional context from the previous attempt:")
-        lines.add(extra)
-        lines.add("")
-        lines.add("Use that context to refine $ktFile only. If the diagnostic points to a different file, ignore it — that file is fixed by a separate call.")
+        tail.add("")
+        tail.add("Additional context from the previous attempt:")
+        tail.add(extra)
+        tail.add("")
+        tail.add("Use that context to refine $ktFile only. If the diagnostic points to a different file, ignore it — that file is fixed by a separate call.")
     }
-    return lines.joinToString("\n")
+    return (scope + listOf(refineConstraintsBlock(isTest)) + tail).joinToString("\n")
 }
 
 private fun looksRateLimited(stdout: String, stderr: String): Boolean =
@@ -148,6 +146,7 @@ fun invokeSkill(
     ktFile: Path,
     risk: String,
     cwd: Path,
+    isTest: Boolean = false,
     extraUserPrompt: String = "",
     onRateLimit: String = "report",
 ): SkillResult {
@@ -157,7 +156,7 @@ fun invokeSkill(
     }
     val cli = resolveCli(cfg)
     val model = modelForRisk(cfg, risk)
-    val userPrompt = buildUserPrompt(javaFile, ktFile, extraUserPrompt)
+    val userPrompt = buildUserPrompt(javaFile, ktFile, isTest, extraUserPrompt)
 
     val cmd = buildList {
         add(cli); add("-p")

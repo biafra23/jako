@@ -13,6 +13,7 @@ out/
 *.iml
 .vscode/
 .fleet/
+.claude/
 
 # OS
 .DS_Store

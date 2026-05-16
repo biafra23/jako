@@ -1,10 +1,14 @@
 package jako.j2k
 
+import com.intellij.ide.impl.OpenProjectTask
+import com.intellij.ide.impl.ProjectUtil
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.application.ApplicationStarter
 import com.intellij.openapi.application.ReadAction
 import com.intellij.openapi.diagnostic.thisLogger
+import com.intellij.openapi.module.ModuleUtilCore
 import com.intellij.openapi.progress.EmptyProgressIndicator
+import com.intellij.openapi.project.DumbService
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.project.ProjectManager
 import com.intellij.openapi.vfs.LocalFileSystem
@@ -20,16 +24,26 @@ import java.nio.file.Path
  * Headless J2K driver — see plan-2-thin-orchestrator.md §2.1.
  *
  * Invoked by jako's orchestrator (when `j2k.strategy: headless_idea`)
- * in one of two shapes:
+ * in one of these shapes:
  *
  *     idea jakoConvert <java_in> <kt_out>
  *     idea jakoConvert --manifest <path>
+ *     idea jakoConvert --project <root> <java_in> <kt_out>
+ *     idea jakoConvert --project <root> --manifest <path>
  *
  * The single-file form is kept for debugging and one-shots. The manifest
  * form is what the orchestrator uses for real runs: a 20s IDE startup is
  * fine to amortize across a batch of files but ruinous per-file. Manifest
  * format is one `<java_in>\t<kt_out>` per line; blank lines and lines
  * starting with `#` are ignored.
+ *
+ * `--project <root>` opens the target project (Gradle / Maven / generic),
+ * waits for indexing to settle, and uses *that* project's PSI for the
+ * conversion. Cross-file types resolve through the project's classpath
+ * instead of through `defaultProject`'s nothing — J2K produces noticeably
+ * better Kotlin (proper types, smart casts, idiomatic interop) when it
+ * can see the classpath. Without `--project` the converter falls back to
+ * `defaultProject` (fast startup, weaker output — see `convert` KDoc).
  *
  * **Threading rules learned the hard way:**
  * 1. `ApplicationStarter.main()` runs on the IDE's EDT.
@@ -60,25 +74,19 @@ class JakoConvertStarter : ApplicationStarter {
     @Suppress("OVERRIDE_DEPRECATION")
     override val commandName: String = "jakoConvert"
 
+    private data class Parsed(
+        val projectRoot: Path?,
+        val pairs: List<Pair<Path, Path>>,
+    )
+
     override fun main(args: List<String>) {
         // args[0] is the command name itself, args[1..] are positional.
-        val tail = args.drop(1)
-        val pairs: List<Pair<Path, Path>> = when {
-            tail.size == 2 && tail[0] == "--manifest" ->
-                parseManifest(Path.of(tail[1]).toAbsolutePath())
-            tail.size == 2 && !tail[0].startsWith("--") ->
-                listOf(Path.of(tail[0]).toAbsolutePath() to Path.of(tail[1]).toAbsolutePath())
-            else -> {
-                System.err.println("usage: idea jakoConvert <java_in> <kt_out>")
-                System.err.println("   or: idea jakoConvert --manifest <path>")
-                haltWith(2)
-            }
-        }
-        if (pairs.isEmpty()) {
-            System.err.println("jakoConvert: manifest had no pairs to convert")
+        val parsed = parseArgs(args.drop(1))
+        if (parsed.pairs.isEmpty()) {
+            System.err.println("jakoConvert: nothing to convert")
             haltWith(2)
         }
-        val missing = pairs.filterNot { (javaIn, _) -> Files.isRegularFile(javaIn) }
+        val missing = parsed.pairs.filterNot { (javaIn, _) -> Files.isRegularFile(javaIn) }
         if (missing.isNotEmpty()) {
             missing.forEach { (javaIn, _) ->
                 System.err.println("jakoConvert: input not a regular file: $javaIn")
@@ -91,9 +99,25 @@ class JakoConvertStarter : ApplicationStarter {
         // pumping EDT events while conversion runs; the pooled task
         // triggers exit when done.
         app.executeOnPooledThread {
+            // Project load is slow (Gradle sync + indexing on first run);
+            // do it on the pooled thread, not the EDT. openProject bounces
+            // the actual `openOrImport` call back to EDT via invokeAndWait.
+            val project: Project = if (parsed.projectRoot != null) {
+                runCatching { openProject(parsed.projectRoot) }.getOrElse { e ->
+                    log.warn("jakoConvert: failed to open project ${parsed.projectRoot}", e)
+                    System.err.println(
+                        "jakoConvert: open project ${parsed.projectRoot}: " +
+                            "${e.javaClass.simpleName}: ${e.message}",
+                    )
+                    haltWith(1)
+                }
+            } else {
+                ProjectManager.getInstance().defaultProject
+            }
+
             var anyFailed = false
-            for ((javaIn, ktOut) in pairs) {
-                runCatching { convert(javaIn) }.fold(
+            for ((javaIn, ktOut) in parsed.pairs) {
+                runCatching { convert(project, javaIn) }.fold(
                     onSuccess = { kotlinSource ->
                         runCatching {
                             Files.createDirectories(ktOut.parent)
@@ -121,6 +145,33 @@ class JakoConvertStarter : ApplicationStarter {
     }
 
     /**
+     * Linear arg parser. Recognises an optional leading `--project <root>`
+     * followed by either a `--manifest <path>` flag or a `<java_in> <kt_out>`
+     * pair. Anything else aborts with exit 2 — silently doing the wrong
+     * thing on a malformed call is worse than a hard fail.
+     */
+    private fun parseArgs(rawArgs: List<String>): Parsed {
+        val rest = rawArgs.toMutableList()
+        var projectRoot: Path? = null
+        if (rest.size >= 2 && rest[0] == "--project") {
+            projectRoot = Path.of(rest[1]).toAbsolutePath()
+            rest.subList(0, 2).clear()
+        }
+        val pairs: List<Pair<Path, Path>> = when {
+            rest.size == 2 && rest[0] == "--manifest" ->
+                parseManifest(Path.of(rest[1]).toAbsolutePath())
+            rest.size == 2 && !rest[0].startsWith("--") ->
+                listOf(Path.of(rest[0]).toAbsolutePath() to Path.of(rest[1]).toAbsolutePath())
+            else -> {
+                System.err.println("usage: idea jakoConvert [--project <root>] <java_in> <kt_out>")
+                System.err.println("   or: idea jakoConvert [--project <root>] --manifest <path>")
+                haltWith(2)
+            }
+        }
+        return Parsed(projectRoot, pairs)
+    }
+
+    /**
      * Parses a manifest file: one `<java_in>\t<kt_out>` per line. Blank
      * lines and lines beginning with `#` are skipped. Bad lines abort
      * with exit 2 — silently skipping them would mask a corrupted
@@ -145,32 +196,60 @@ class JakoConvertStarter : ApplicationStarter {
     }
 
     /**
-     * `defaultProject` is a lightweight singleton project IntelliJ exposes
-     * for tools that don't need a real loaded workspace. It has **no SDK,
-     * no library dependencies, no project-specific context** — so symbol
-     * resolution and type inference are weaker than what the IDE menu
-     * gets when converting from a real loaded project. Concrete effects:
+     * Opens `root` as an IntelliJ project on the EDT (where project open
+     * lives) and blocks until it's smart, i.e. indexing has settled.
      *
-     *   - Java types resolving through external libraries (e.g.
-     *     `io.vertx.core.buffer.Buffer`) come through as `Any?` because
-     *     the classpath doesn't see them.
-     *   - Smart casts on cross-file types may not fire.
-     *   - Some `@JvmStatic` / interop annotation choices end up overly
-     *     conservative.
+     * For a Gradle project this triggers the Gradle ProjectOpenProcessor,
+     * which kicks off `Sync Project With Gradle Files` — the dependency
+     * resolution + indexing pass. First run on a fresh `~/.gradle/caches`
+     * downloads everything and can take minutes; subsequent runs reuse
+     * `.idea/` + the gradle cache and complete in tens of seconds.
      *
-     * The refine step downstream fixes most of this, which is why we
-     * accept the trade-off here — using `defaultProject` keeps the
-     * plugin small and the per-file invocation fast (no project import,
-     * no indexing wait).
+     * Once `waitForSmartMode()` returns the loaded project has a proper
+     * module graph + classpath, which is what J2K's type inference needs
+     * to produce idiomatic Kotlin.
      *
-     * A "loaded project" alternative is doable in a follow-up:
-     * `ProjectUtil.openOrImport(targetGradleRoot)` plus a "wait for
-     * indices ready" gate. Higher fidelity, higher startup cost,
-     * many more failure modes (project import can fail for plenty of
-     * reasons not under jako's control). Not in this PR.
+     * On a non-Gradle / non-Maven directory the open still succeeds but
+     * the result is closer to `defaultProject` — no module-level classpath,
+     * just source roots. That's a reasonable degraded mode, not an error.
      */
-    private fun convert(javaIn: Path): String {
-        val project: Project = ProjectManager.getInstance().defaultProject
+    private fun openProject(root: Path): Project {
+        require(Files.isDirectory(root)) { "project root must be a directory: $root" }
+        log.info("jakoConvert: opening project at $root")
+        val app = ApplicationManager.getApplication()
+        var project: Project? = null
+        app.invokeAndWait {
+            project = ProjectUtil.openOrImport(root, OpenProjectTask())
+        }
+        val p = project ?: error("ProjectUtil.openOrImport returned null for $root")
+        log.info("jakoConvert: project opened, waiting for indexing to settle")
+        DumbService.getInstance(p).waitForSmartMode()
+        log.info("jakoConvert: project ready: ${p.name}")
+        return p
+    }
+
+    /**
+     * Conversion in one of two contexts:
+     *
+     * - **Loaded project** (`--project` passed) — `findModuleForFile` finds
+     *   the module containing this `.java`, so J2K's converter is created
+     *   with `targetModule = <that module>`. Type resolution goes through
+     *   the module's full classpath: cross-file types resolve, library
+     *   types come through with the right names, smart casts fire.
+     *
+     * - **`defaultProject` fallback** (no `--project`) — `defaultProject`
+     *   is a lightweight singleton IntelliJ exposes for tools that don't
+     *   need a real workspace. No SDK, no library dependencies, no
+     *   project-specific context. Java types resolving through external
+     *   libraries (e.g. `io.vertx.core.buffer.Buffer`) come through as
+     *   `Any?`; smart casts on cross-file types may not fire; some
+     *   `@JvmStatic` / interop annotation choices end up overly
+     *   conservative. The refine step downstream fixes most of this.
+     *
+     * Both modes go through the same J2K extension and the same K1_OLD
+     * post-processor — only the `Project`/`Module` context differs.
+     */
+    private fun convert(project: Project, javaIn: Path): String {
         val vfile = LocalFileSystem.getInstance()
             .refreshAndFindFileByNioFile(javaIn)
             ?: error("VFS could not resolve $javaIn")
@@ -178,6 +257,15 @@ class JakoConvertStarter : ApplicationStarter {
         return ReadAction.compute<String, Throwable> {
             val psi = PsiManager.getInstance(project).findFile(vfile) as? PsiJavaFile
                 ?: error("not a Java PSI file: $javaIn")
+            // `defaultProject` has no modules, so `findModuleForFile`
+            // returns null and we pass null to the converter — same as
+            // before. A loaded Gradle project will have modules and
+            // J2K picks up the classpath through it.
+            val module = ModuleUtilCore.findModuleForFile(psi)
+            log.info(
+                "jakoConvert: converting $javaIn " +
+                    "(project=${project.name}, module=${module?.name ?: "<none>"})",
+            )
             // The Kind enum is K1_OLD / K1_NEW / K2.
             //
             // - K2: only registers when the IDE runs in K2 mode
@@ -199,7 +287,7 @@ class JakoConvertStarter : ApplicationStarter {
             val ext = J2kConverterExtension.extension(J2kConverterExtension.Kind.K1_OLD)
             val converter = ext.createJavaToKotlinConverter(
                 project,
-                /* targetModule = */ null,
+                module,
                 ConverterSettings.defaultSettings,
                 /* targetFile = */ null,
             )

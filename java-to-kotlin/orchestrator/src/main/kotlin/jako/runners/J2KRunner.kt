@@ -13,10 +13,11 @@ import java.nio.file.Path
  *   external      - `command` is a script that takes <java_in> <kt_out>.
  *                   Use this with scripts/passthrough-j2k.sh or your own
  *                   wrapper around any external converter.
- *   headless_idea - drive IntelliJ's idea.sh with our ApplicationStarter
- *                   plugin. Requires the plugin to be built and installed
- *                   into IDEA (separate Gradle subproject — not in this
- *                   repo yet).
+ *   headless_idea - drive IntelliJ via the :j2k-plugin ApplicationStarter
+ *                   through scripts/run-j2k-headless.sh. The orchestrator
+ *                   additionally passes `--project <projectRoot>` so the
+ *                   plugin loads the target Gradle project and J2K gets
+ *                   classpath-aware type resolution.
  */
 data class J2KResult(
     val ok: Boolean,
@@ -40,6 +41,20 @@ fun describeJ2K(cfg: Config): String {
     return "j2k: strategy=${cfg.j2k.strategy} command=$cmd"
 }
 
+/**
+ * `--project <root>` tells the headless IntelliJ plugin to open the
+ * target Gradle project for proper classpath-aware type resolution.
+ * Only emitted for `headless_idea` — passthrough scripts wouldn't know
+ * what to do with it, and a third-party `external` script's contract is
+ * just `<java> <kt>`.
+ */
+private fun headlessIdeaProjectArgs(cfg: Config): List<String> =
+    if (cfg.j2k.strategy == "headless_idea") {
+        listOf("--project", cfg.projectRoot().toString())
+    } else {
+        emptyList()
+    }
+
 private fun buildCommand(cfg: Config, javaIn: Path, ktOut: Path): List<String> {
     if (cfg.j2k.command.isBlank()) {
         error("j2k.command is empty in config.yaml — set it (e.g. to scripts/passthrough-j2k.sh).")
@@ -52,9 +67,7 @@ private fun buildCommand(cfg: Config, javaIn: Path, ktOut: Path): List<String> {
         }
         "headless_idea" -> buildList {
             add(resolved); addAll(cfg.j2k.args)
-            // The exact args depend on the ApplicationStarter the plugin registers.
-            // Convention: starter name is passed in cfg.j2k.args; we append the
-            // two file paths.
+            addAll(headlessIdeaProjectArgs(cfg))
             add(javaIn.toString()); add(ktOut.toString())
         }
         else -> error("unknown j2k.strategy: ${cfg.j2k.strategy}")
@@ -68,6 +81,7 @@ private fun buildBatchCommand(cfg: Config, manifest: Path): List<String> {
     val resolved = cfg.resolve(cfg.j2k.command).toString()
     return buildList {
         add(resolved); addAll(cfg.j2k.args)
+        addAll(headlessIdeaProjectArgs(cfg))
         add("--manifest"); add(manifest.toString())
     }
 }

@@ -56,3 +56,12 @@ intellijPlatform {
 // `buildPlugin` produces a redistributable .zip for users who want to
 // drop the plugin into a separately-managed IntelliJ instance (and is
 // what CI uses to verify the plugin packages cleanly).
+
+// `idea.trust.all.projects=true` skips the "Trust this project?" prompt
+// that otherwise blocks `openOrImport` headlessly. We're never opening
+// untrusted code via this driver — the orchestrator only points it at
+// the user's own target project — so suppressing the prompt is the
+// right call.
+tasks.named<JavaExec>("runIde") {
+    systemProperty("idea.trust.all.projects", "true")
+}

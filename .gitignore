@@ -14,6 +14,9 @@ out/
 .vscode/
 .fleet/
 .claude/
+# IntelliJ Platform Gradle plugin's working dir (downloaded IDE
+# artifacts, sandbox, self-update lock). All caches and generated.
+.intellijPlatform/
 
 # OS
 .DS_Store

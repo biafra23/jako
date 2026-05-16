@@ -29,3 +29,10 @@ jobs:
 
       - name: Compile + test orchestrator
         run: ./gradlew :orchestrator:build --no-daemon --stacktrace
+
+      # Type-check the headless J2K plugin so refactors that break it
+      # are caught here, not at the next end-to-end run. Skip the full
+      # `:build` task — that downloads ~1GB of IntelliJ Community for the
+      # sandbox tests, which is excessive for every push.
+      - name: Compile j2k-plugin
+        run: ./gradlew :j2k-plugin:compileKotlin --no-daemon --stacktrace

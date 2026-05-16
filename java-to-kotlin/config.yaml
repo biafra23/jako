@@ -40,13 +40,21 @@ j2k:
   #                   the whole conversion. The fallback when no J2K binary
   #                   is wired up. The orchestrator treats this as "J2K not
   #                   available" for chain-routing purposes.
-  #   headless_idea:  drive idea.sh in headless mode via a custom IntelliJ
-  #                   ApplicationStarter plugin we ship. Requires building
-  #                   that plugin separately.
+  #   headless_idea:  drive a real headless IntelliJ via the :j2k-plugin
+  #                   ApplicationStarter. The orchestrator gets idiomatic
+  #                   Kotlin as J2K's output, so the LLM refine step only
+  #                   needs to polish. The orchestrator batches a whole
+  #                   cycle into a single IDE invocation via the manifest
+  #                   protocol — ~20s of IDE startup amortizes across the
+  #                   batch, sub-second per file thereafter.
   #   external:       `command` is a fully-formed script that takes
-  #                   <java_in> <kt_out> and writes the converted Kotlin.
+  #                   <java_in> <kt_out> (or `--manifest <path>` if it
+  #                   supports batch mode) and writes the converted Kotlin.
   strategy: passthrough
   command: scripts/passthrough-j2k.sh
+  # To opt into real J2K via the bundled IntelliJ plugin:
+  # strategy: headless_idea
+  # command: scripts/run-j2k-headless.sh
   args: []
   timeout_seconds: 1800
 

@@ -37,7 +37,19 @@ fun main(rawArgs: Array<String>) {
         if (args.worktree.isNullOrBlank()) afterOverrides
         else {
             val sourceRepo = afterOverrides.projectRoot()
-            val wtPath = Path.of(args.worktree).toAbsolutePath().normalize()
+            // Expand `~` / `~/...` to $HOME (Java doesn't; the shell does,
+            // and Gradle's `--args` quoting suppresses shell expansion);
+            // anything else is left to `Path.toAbsolutePath()`, which keeps
+            // standard CLI semantics (relatives resolve against CWD, not
+            // against config.yaml's directory). `~otheruser/...` syntax is
+            // not supported and falls through unchanged.
+            val wtRaw = args.worktree
+            val wtPath = when {
+                wtRaw == "~" -> Path.of(System.getProperty("user.home"))
+                wtRaw.startsWith("~/") ->
+                    Path.of(System.getProperty("user.home"), wtRaw.removePrefix("~/"))
+                else -> Path.of(wtRaw)
+            }.toAbsolutePath().normalize()
             val module = afterOverrides.project.module.ifBlank { "all" }
             val branch = args.worktreeBranch?.ifBlank { null } ?: "jako/$module"
             val effective = ensureWorktree(sourceRepo, wtPath, branch)
@@ -71,8 +83,13 @@ fun main(rawArgs: Array<String>) {
             writeReports(cfg, analysis, state, wallMillis = System.currentTimeMillis() - t0)
         }
         "all" -> {
-            val analysis = runAnalyze(cfg)
-            runScaffold(cfg, analysis)
+            val initial = runAnalyze(cfg)
+            runScaffold(cfg, initial)
+            // Scaffold physically moves .java files into KMP layout but
+            // doesn't update the in-memory analysis paths. Rebind so
+            // runConvert (and any subsequent --phase convert resume)
+            // hands J2K paths that actually exist on disk.
+            val analysis = jako.phase1.rebindAnalysisToKmpLayout(cfg, initial)
             val state = loadState(cfg, force = args.force)
             runConvert(cfg, analysis, state, only = args.only)
             writeReports(cfg, analysis, state, wallMillis = System.currentTimeMillis() - t0)

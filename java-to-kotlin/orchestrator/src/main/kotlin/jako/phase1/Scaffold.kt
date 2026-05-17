@@ -157,11 +157,17 @@ private fun renderBuildKts(deps: List<GradleDep>, usesAgp: Boolean): String {
         // Kotlin plugin; the JVM-specific sub-extension would force a
         // narrower contract than we need just to set source dirs.
         appendLine("extensions.configure<org.jetbrains.kotlin.gradle.dsl.KotlinProjectExtension>(\"kotlin\") {")
+        appendLine("    // Include the java dirs in Kotlin's source set so the Kotlin")
+        appendLine("    // compiler can see Java types from the same module — it parses")
+        appendLine("    // .java sources directly for cross-language resolution, and")
+        appendLine("    // `setSrcDirs` *replaces* the default (which already implicitly")
+        appendLine("    // includes java/). Without this, every Kotlin reference to a")
+        appendLine("    // Java type in the same module fails `Unresolved reference`.")
         appendLine("    sourceSets.named(\"main\") {")
-        appendLine("        kotlin.setSrcDirs(listOf(\"src/jvmMain/kotlin\"))")
+        appendLine("        kotlin.setSrcDirs(listOf(\"src/jvmMain/kotlin\", \"src/jvmMain/java\"))")
         appendLine("    }")
         appendLine("    sourceSets.named(\"test\") {")
-        appendLine("        kotlin.setSrcDirs(listOf(\"src/jvmTest/kotlin\"))")
+        appendLine("        kotlin.setSrcDirs(listOf(\"src/jvmTest/kotlin\", \"src/jvmTest/java\"))")
         appendLine("    }")
         appendLine("}")
         if (deps.isNotEmpty()) {
